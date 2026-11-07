@@ -1,0 +1,57 @@
+# Configuração local, credenciais e variáveis de ambiente
+/config.toml
+/config.local*.toml
+.env
+.env.*
+!.env.example
+
+# Traduções, relatórios, backups e mods originais
+/saida/
+/output/
+/mods/
+/a game of thrones/
+*.zip
+/keep_sugerido.txt
+/glossary_sugerido.txt
+/termos_sugeridos.txt
+
+# Cache de tradução e arquivos auxiliares do SQLite
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
+
+# Python, ambientes virtuais e ferramentas de análise
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+/env/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Distribuição e instalação local
+/build/
+/dist/
+*.egg-info/
+*.egg
+
+# Temporários, logs e arquivos do sistema/editor
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+.idea/
+.vscode/*.local.json
+.DS_Store
+Thumbs.db
+Desktop.ini

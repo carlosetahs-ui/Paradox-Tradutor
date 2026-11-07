@@ -1,0 +1,67 @@
+# Copie para config.toml e ajuste. Sua configuração local não entra no Git.
+# Caminhos relativos partem desta pasta. No Windows, use aspas simples nos caminhos.
+
+[model]
+# translators | google | argos | ollama | openai | echo
+# Instalação: python -m pip install -e ".[translators]"
+backend = "translators"
+
+# Serviços online: pausas e limites globais de pedidos.
+providers = ["google", "bing", "alibaba", "yandex"]
+source_lang = "en"
+target_lang = "pt"
+max_per_minute = 20          # 0 desativa este limite
+max_per_hour = 600          # 0 desativa este limite
+pause_min = 1.5
+pause_max = 4.0
+long_pause_every = 80        # 0 desativa a pausa longa
+long_pause_min = 40
+long_pause_max = 90
+cooldown = 600
+max_retries = 4
+backoff_base = 15
+max_chars = 3000
+
+# Usados por ollama/openai. LM Studio: http://localhost:1234/v1
+name = "qwen2.5:7b-instruct"
+host = "http://localhost:11434"
+temperature = 0.2
+timeout = 180
+# api_key = ""              # somente openai; não versione credenciais
+# long_pause = 30           # duração da pausa longa do backend google
+
+[translate]
+source_column = "english"
+# Selecione no jogo um dos idiomas abaixo para ler a tradução em português.
+write_columns = ["english"]
+mode = "overlay"            # mod separado; inplace altera o original com backup
+output_dir = "saida"
+cache = "cache.sqlite"
+reuse_cache_from = "auto"   # ou ["google", "argos", "ollama"]; [] desativa
+workers = 1                 # serviços online compartilham o limitador de pedidos
+safety = "strict"           # normal | strict | paranoid (pula textos com códigos)
+skip_files = []             # aceita padrões, ex.: ["*_baronies.csv"]
+context = "Fantasia medieval em um mod para Crusader Kings II."
+
+# Os arquivos fornecidos contêm termos de Game of Thrones. Revise para outros mods.
+# Aceitam um caminho, lista de caminhos ou "" para desativar.
+keep_file = "keep.txt"
+glossary_file = "glossary.txt"
+replace_file = "substituicoes.txt"
+ptbr_fix = true
+
+[[mods]]
+name = "A Game of Thrones"   # nome EXATO do descritor original
+path = 'mods/a game of thrones'
+# mod_file = 'mods/A Game of Thrones.mod'  # opcional, usado se name não for informado
+
+# [[mods]]
+# name = "Outro Mod"
+# path = 'D:\SteamLibrary\steamapps\workshop\content\203770\1234567890'
+
+# Termos opcionais somados aos arquivos; o glossário do arquivo vence conflitos.
+[glossary]
+# Maester = "Meistre"
+
+[keep]
+# terms = ["Winterfell"]

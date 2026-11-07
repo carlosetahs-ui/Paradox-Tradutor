@@ -1,0 +1,10 @@
+# Correções aplicadas DEPOIS da tradução, em todas as linhas:  errado = certo   (uma por linha; # é comentário)
+# Palavra inteira, sem diferenciar maiúsculas/minúsculas (a capitalização da palavra original é mantida).
+# Não toca nos códigos do jogo, nos termos de keep.txt nem nas traduções de glossary.txt.
+# Mudar este arquivo vale na hora, sem retraduzir nada (o cache guarda o texto bruto do serviço).
+# Já existe uma lista embutida de pt-PT -> pt-BR (partilhar->compartilhar, ecrã->tela, "está a fazer"->"está fazendo"...);
+# desligue com  ptbr_fix = false  em [translate].
+#
+# Exemplos:
+# Etiópe = Etiópia
+# aterrando = pisando

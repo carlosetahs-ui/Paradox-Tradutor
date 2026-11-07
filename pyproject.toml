@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ck2-mod-translator"
+dynamic = ["version"]
+description = "Tradutor de mods do Crusader Kings II para português do Brasil"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+translators = ["translators>=5.9,<6"]
+google = ["deep-translator>=1.11,<2"]
+argos = ["argostranslate>=1.9,<2"]
+
+[project.scripts]
+ck2tr = "ck2translator.cli:main"
+ck2-glossario = "ck2translator.glossario:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "ck2translator.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["ck2translator*"]
+exclude = ["tests*"]
