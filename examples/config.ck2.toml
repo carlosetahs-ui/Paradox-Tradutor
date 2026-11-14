@@ -1,5 +1,16 @@
-# Copie para config.toml e ajuste. Sua configuração local não entra no Git.
+# Copie este exemplo para config.toml NA RAIZ do projeto e ajuste.
+# Sua configuração local não entra no Git.
 # Caminhos relativos partem desta pasta. No Windows, use aspas simples nos caminhos.
+# Para Europa Universalis IV, use examples/config.eu4.toml.
+# Comandos na raiz, depois de copiar e ajustar config.toml:
+# Tradução:   python ck2tr.py translate --config config.toml
+# Check:      python ck2tr.py check --config config.toml
+# Scan:       python ck2tr.py scan --config config.toml
+# Teste de 30 textos: python ck2tr.py translate --config config.toml --limit 30
+# check verifica a estrutura da tradução; verify também continua disponível.
+
+[game]
+id = "ck2"                 # opcional: configurações sem [game] continuam usando CK2
 
 [model]
 # translators | google | argos | ollama | openai | echo
@@ -36,18 +47,17 @@ source_column = "english"
 write_columns = ["english"]
 mode = "overlay"            # mod separado; inplace altera o original com backup
 output_dir = "saida"
-cache = "cache.sqlite"
+cache = "data/cache/cache.sqlite"
 reuse_cache_from = "auto"   # ou ["google", "argos", "ollama"]; [] desativa
 workers = 1                 # serviços online compartilham o limitador de pedidos
 safety = "strict"           # normal | strict | paranoid (pula textos com códigos)
 skip_files = []             # aceita padrões, ex.: ["*_baronies.csv"]
 context = "Fantasia medieval em um mod para Crusader Kings II."
 
-# Os arquivos fornecidos contêm termos de Game of Thrones. Revise para outros mods.
 # Aceitam um caminho, lista de caminhos ou "" para desativar.
-keep_file = "keep.txt"
-glossary_file = "glossary.txt"
-replace_file = "substituicoes.txt"
+keep_file = "data/terms/keep.txt"
+glossary_file = "data/terms/glossary.txt"
+replace_file = "data/terms/substituicoes.txt"
 ptbr_fix = true
 
 [[mods]]

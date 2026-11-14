@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ck2tr.py - tradutor de localisation do Crusader Kings II com modelo local.
+"""Tradutor de localisation de mods Paradox (CK2 e Europa Universalis IV).
 
   python ck2tr.py scan      --config config.toml     # só analisa 
   python ck2tr.py translate --config config.toml     # traduz os mods listados
@@ -12,6 +12,7 @@ import argparse
 import collections
 import csv
 import fnmatch
+import json
 import re
 import shutil
 import sqlite3
@@ -19,13 +20,14 @@ import sys
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 
-from .ck2loc import TOKEN_RE, LocFile, compare, hard_problems
-from . import revisao
+from .ck2loc import EU4_TOKEN_RE, TOKEN_RE
+from . import localisation, revisao
 from .config import BACKENDS, ConfigError, Mod, load_config, resolve_mods
 from .files import atomic_path, atomic_write
+from .profiles import get_profile, write_descriptors
 from . import __version__
 from .translator import (ArgosBackend, Backend, BackendError, Cache, EchoBackend, GoogleBackend, OllamaBackend,
                         OpenAICompatBackend, RateLimiter, Translator, TranslatorsBackend, fit_cp1252,
@@ -35,9 +37,20 @@ from .translator import (ArgosBackend, Backend, BackendError, Cache, EchoBackend
 # --------------------------------------------------------------------------- configuração
 def loc_files(mod: Mod, cfg: dict) -> list[Path]:
     skip = [s.lower() for s in cfg["translate"].get("skip_files", [])]
-    return sorted(p for p in mod.loc_dir.iterdir()
-                  if p.is_file() and p.suffix.lower() == ".csv"
-                  and not any(fnmatch.fnmatch(p.name.lower(), pat) for pat in skip))
+    profile = get_profile(cfg)
+    paths = mod.loc_dir.rglob("*") if profile.recursive else mod.loc_dir.iterdir()
+    return sorted(p for p in paths
+                  if p.is_file() and p.suffix.lower() == profile.suffix
+                  and not any(fnmatch.fnmatch(p.name.lower(), pat) or
+                              fnmatch.fnmatch(p.relative_to(mod.loc_dir).as_posix().lower(), pat)
+                              for pat in skip))
+
+
+def _read_loc(path: Path, cfg: dict):
+    try:
+        return localisation.read(path, get_profile(cfg).id)
+    except (ValueError, UnicodeError) as error:
+        raise ConfigError(f"Localisation inválida em {path}: {error}") from error
 
 
 def build_backend(cfg: dict, override: str | None, *, offline: bool = False):
@@ -95,27 +108,24 @@ def cmd_scan(cfg: dict, mods: list[Mod]) -> int:
         uniq: set[str] = set()
         total_chars = total_entries = 0
         for p in loc_files(mod, cfg):
-            loc = LocFile.read(p)
-            sc = loc.columns[src_name]
-            n_entries = n_src = 0
-            odd = 0
-            for ln in loc.entries():
-                n_entries += 1
-                if len(ln.fields) != 15:
-                    odd += 1
-                if len(ln.fields) > sc and ln.key and ln.fields[sc].strip():
-                    n_src += 1
-                    uniq.add(ln.fields[sc])
-                    total_chars += len(ln.fields[sc])
+            loc = _read_loc(p, cfg)
+            n_entries = sum(1 for _ in loc.entries())
+            odd = (sum(len(ln.fields) != 15 for ln in loc.entries())
+                   if get_profile(cfg).id == "ck2" else 0)
+            n_src = 0
+            for _, text in localisation.source_entries(loc, src_name):
+                n_src += 1
+                uniq.add(text)
+                total_chars += len(text)
             total_entries += n_src
             flag = f"  [{odd} linhas com nº de colunas != 15]" if odd else ""
-            print(f"  {p.name:<45} {loc.encoding:<9} {n_entries:>6} entradas, "
+            print(f"  {p.relative_to(mod.loc_dir).as_posix():<45} {loc.encoding:<9} {n_entries:>6} entradas, "
                   f"{n_src:>6} com texto em '{src_name}'{flag}")
         print(f"  -> {total_entries} textos ({len(uniq)} únicos), ~{total_chars:,} caracteres")
     seen_in: dict[str, list[str]] = {}
     for mod in mods:
         for p in loc_files(mod, cfg):
-            seen_in.setdefault(p.name.lower(), []).append(mod.name)
+            seen_in.setdefault(p.relative_to(mod.loc_dir).as_posix().lower(), []).append(mod.name)
     clash = {n: m for n, m in seen_in.items() if len(set(m)) > 1}
     if clash:
         print("\nATENÇÃO: arquivos com o MESMO NOME em mods diferentes (no jogo, o que carrega por último vence).")
@@ -145,6 +155,7 @@ def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None
     tr = cfg["translate"]
     out_root: Path = tr["output_dir"]
     src_name, write_names = tr["source_column"], tr["write_columns"]
+    game = get_profile(cfg).id
 
     if tr["mode"] == "inplace":
         backup = out_root / "backup" / mod.slug
@@ -152,13 +163,11 @@ def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None
             sys.exit(f"Já existe backup em {backup}. Este mod provavelmente já foi traduzido "
                      "in-place; traduzir de novo traduziria o português. Restaure o backup ou use overlay.")
 
-    locs = [LocFile.read(p) for p in loc_files(mod, cfg)]
+    locs = [_read_loc(p, cfg) for p in loc_files(mod, cfg)]
     texts: dict[str, None] = {}
     for loc in locs:
-        sc = loc.columns[src_name]
-        for ln in loc.entries():
-            if len(ln.fields) > sc and ln.key and ln.fields[sc].strip():
-                texts.setdefault(ln.fields[sc], None)
+        for _, text in localisation.source_entries(loc, src_name):
+            texts.setdefault(text, None)
     todo = list(texts)[:limit] if limit is not None else list(texts)
     print(f"\n== {mod.name}: {len(locs)} arquivos, {len(todo)} textos únicos para traduzir")
 
@@ -188,42 +197,37 @@ def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None
     report: list[list[str]] = []
     written = reverted = 0
     for loc in locs:
-        sc = loc.columns[src_name]
-        write_idx = [loc.columns[n] for n in write_names]
         changed = 0
-        for ln in loc.entries():
-            if len(ln.fields) <= sc:
-                continue
-            res = results.get(ln.fields[sc])
+        relative = loc.path.relative_to(mod.loc_dir)
+        for ln, source in localisation.source_entries(loc, src_name):
+            res = results.get(source)
             if res is None or res.status == "skip":
                 continue
             if res.status == "falha":
-                report.append([loc.path.name, ln.key, "falha", ln.fields[sc], res.note])
-                continue
-            if any(ci >= len(ln.fields) or
-                   (ci == len(ln.fields) - 1 and ln.fields[ci].strip().lower() == "x") for ci in write_idx):
-                report.append([loc.path.name, ln.key, "revertida", ln.fields[sc],
-                               "coluna de destino ausente ou ocupada pelo marcador final x; estrutura preservada"])
-                reverted += 1
+                report.append([relative.as_posix(), ln.key, "falha", source, res.note])
                 continue
             new = fit_cp1252(res.text) if not loc.encoding.startswith("utf-8") else res.text
-            if tr["safety"] != "normal":                   # trava de segurança: na dúvida, fica o original
-                new = normalize_punct(ln.fields[sc], new)
-                bad = hard_problems(ln.fields[sc], new)
+            if tr["safety"] != "normal" or game == "eu4":
+                new = normalize_punct(source, new)
+                bad = localisation.hard_problems(source, new, game)
                 if bad:
-                    report.append([loc.path.name, ln.key, "revertida", ln.fields[sc], "; ".join(bad)])
+                    report.append([relative.as_posix(), ln.key, "revertida", source, "; ".join(bad)])
                     reverted += 1
                     continue
-            for ci in write_idx:
-                loc.set_cell(ln, ci, new)
+            try:
+                localisation.set_translation(loc, ln, write_names, new)
+            except ValueError as error:
+                report.append([relative.as_posix(), ln.key, "revertida", source, str(error)])
+                reverted += 1
+                continue
             changed += 1
-        overlay = out_root / f"{mod.slug}_ptbr" / "localisation" / loc.path.name
+        overlay = out_root / f"{mod.slug}_ptbr" / "localisation" / relative
         if not changed and not (tr["mode"] == "overlay" and overlay.exists()):
             continue
         if tr["mode"] == "overlay":
             dest = overlay
         else:
-            backup_file = out_root / "backup" / mod.slug / "localisation" / loc.path.name
+            backup_file = out_root / "backup" / mod.slug / "localisation" / relative
             backup_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(loc.path, backup_file)
             dest = loc.path
@@ -232,7 +236,8 @@ def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None
         print(f"  gravado: {dest}  ({changed} linhas)")
 
     if tr["mode"] == "overlay" and written:
-        write_mod_descriptor(out_root, mod)
+        write_descriptors(out_root, mod, cfg)
+        _write_manifest(cfg, mod)
     rep = out_root / f"{mod.slug}_relatorio.csv"
     if report or rep.exists():
         out_root.mkdir(parents=True, exist_ok=True)
@@ -250,12 +255,8 @@ def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None
 
 
 def write_mod_descriptor(out_root: Path, mod: Mod) -> None:
-    safe = mod.name.replace('"', "'")
-    text = (f'name = "{safe} [PT-BR]"\n'
-            f'path = "mod/{mod.slug}_ptbr"\n'
-            f'dependencies = {{ "{safe}" }}\n')
-    out_root.mkdir(parents=True, exist_ok=True)
-    atomic_write(out_root / f"{mod.slug}_ptbr.mod", text.encode("cp1252", errors="replace"))
+    """Entrada legada para a geração de descritores do CK2."""
+    write_descriptors(out_root, mod)
 
 
 NO_PING = ("translators", "google")      # backends online: o pré-teste gastaria um pedido à toa
@@ -270,14 +271,22 @@ def make_translator(cfg: dict, backend_override: str | None, *, offline: bool = 
     post = revisao.build(bool(cfg["translate"]["ptbr_fix"]), cfg.get("replacements"))
     translator = Translator(backend, cache, cfg["glossary_terms"], cfg["keep_terms"],
                             cfg["translate"].get("context", ""), reuse_from=reuse,
-                            paranoid=cfg["translate"]["safety"] == "paranoid", post=post)
+                            paranoid=cfg["translate"]["safety"] == "paranoid", post=post,
+                            game=get_profile(cfg).id)
     return backend, cache, translator
 
 
 def cmd_translate(cfg: dict, mods: list[Mod], backend_override: str | None, limit: int | None) -> int:
+    # Confere todos os overlays antes de abrir cache, iniciar serviços ou
+    # gravar saídas, inclusive quando dois perfis compartilham o mesmo nome.
+    if cfg["translate"]["mode"] == "overlay":
+        for mod in mods:
+            _read_manifest(cfg, _translation_directory(cfg, mod))
     backend, cache, translator = make_translator(cfg, backend_override)
     try:
         print(f"Modelo: {backend.model_id}  | modo: {cfg['translate']['mode']}  | segurança: {cfg['translate']['safety']}")
+        if backend.model_id == "echo":
+            print("Modo de teste echo: acrescenta 'PT> ' aos textos; não realiza tradução.")
         print(f"Termos: {len(cfg['keep_terms'])} para manter, {len(cfg['glossary_terms'])} no glossário")
         if cfg["replacements"] or cfg["translate"]["ptbr_fix"]:
             print(f"Pós-edição: ptbr_fix={'sim' if cfg['translate']['ptbr_fix'] else 'não'}, "
@@ -301,7 +310,7 @@ def cmd_translate(cfg: dict, mods: list[Mod], backend_override: str | None, limi
     finally:
         cache.close()
     print("\nPróximo passo: rode 'verify' e depois copie a(s) pasta(s) *_ptbr e o(s) .mod "
-          "de saida/ para a pasta mod do CK2.")
+          f"da saída para a pasta mod de {get_profile(cfg).name}.")
     return 1 if failures else 0
 
 
@@ -324,11 +333,9 @@ def cmd_status(cfg: dict, mods: list[Mod], backend_override: str | None) -> int:
         for mod in mods:
             texts: dict[str, None] = {}
             for p in loc_files(mod, cfg):
-                loc = LocFile.read(p)
-                sc = loc.columns[src_name]
-                for ln in loc.entries():
-                    if len(ln.fields) > sc and ln.key and ln.fields[sc].strip():
-                        texts.setdefault(ln.fields[sc], None)
+                loc = _read_loc(p, cfg)
+                for _, text in localisation.source_entries(loc, src_name):
+                    texts.setdefault(text, None)
             c = collections.Counter(translator.translate(t, dry=True).status for t in texts)
             pend = c["pendente"]
             total_pend += pend
@@ -350,8 +357,8 @@ def cmd_status(cfg: dict, mods: list[Mod], backend_override: str | None) -> int:
 LEIA_ME = """{name} - Tradução PT-BR (automática)
 
 COMO INSTALAR
-1. Copie a pasta "{slug}_ptbr" e o arquivo "{slug}_ptbr.mod" para a pasta de mods do Crusader Kings II:
-   Documentos\\Paradox Interactive\\Crusader Kings II\\mod
+1. Copie a pasta "{slug}_ptbr" e o arquivo "{slug}_ptbr.mod" para a pasta de mods de {game}:
+   Documentos\\Paradox Interactive\\{game}\\mod
 2. No launcher do jogo, escolha um destes idiomas: {languages}, e ative
    "{name}" e depois "{name} [PT-BR]". A tradução precisa ficar DEPOIS do mod original.
 
@@ -376,13 +383,19 @@ def cmd_package(cfg: dict, mods: list[Mod]) -> int:
             print(f"{mod.name}: nada para empacotar (rode 'translate' em modo overlay antes).")
             failures += 1
             continue
+        if get_profile(cfg).id == "eu4" and not (folder / "descriptor.mod").is_file():
+            print(f"{mod.name}: falta descriptor.mod interno; rode 'translate' novamente.")
+            failures += 1
+            continue
         if cmd_verify(cfg, [mod]):
             print(f"{mod.name}: pacote não gerado; corrija os problemas encontrados pelo verify.")
             failures += 1
             continue
         zpath = out_root / f"{mod.slug}_ptbr.zip"
-        languages = {"english": "INGLÊS", "french": "FRANCÊS", "german": "ALEMÃO", "spanish": "ESPANHOL"}
+        languages = {"english": "INGLÊS", "french": "FRANCÊS", "german": "ALEMÃO", "spanish": "ESPANHOL",
+                     "russian": "RUSSO"}
         readme = LEIA_ME.format(name=mod.name, slug=mod.slug,
+                               game=get_profile(cfg).name,
                                languages=", ".join(languages[c] for c in cfg["translate"]["write_columns"]))
         with atomic_path(zpath) as temporary:
             with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as z:
@@ -403,13 +416,14 @@ _TOK_RE = re.compile(r"\{\d+\}|[A-Za-z\u00c0-\u00ff][A-Za-z\u00c0-\u00ff'\u2019\
 _CONNECT = {"of", "de", "da", "do", "del", "von", "van", "the", "la", "le"}
 
 
-def suggest_terms(texts: list[str], min_count: int = 5) -> list[tuple[str, int]]:
+def suggest_terms(texts: list[str], min_count: int = 5, *, game: str = "ck2") -> list[tuple[str, int]]:
     """Acha nomes próprios: palavras que aparecem com inicial maiúscula no MEIO das frases e quase nunca em minúscula."""
     cap_mid: collections.Counter = collections.Counter()
     lower: collections.Counter = collections.Counter()
     toks_all = []
+    token_re = EU4_TOKEN_RE if game == "eu4" else TOKEN_RE
     for t in texts:
-        toks = _TOK_RE.findall(mask(t)[0].replace("\\n", "\n"))
+        toks = _TOK_RE.findall(mask(t, token_re=token_re)[0].replace("\\n", "\n"))
         toks_all.append(toks)
         start = True
         for tok in toks:
@@ -448,12 +462,9 @@ def cmd_terms(cfg: dict, mods: list[Mod], min_count: int) -> int:
     seen: set[str] = set()
     for mod in mods:
         for p in loc_files(mod, cfg):
-            loc = LocFile.read(p)
-            sc = loc.columns[src_name]
-            for ln in loc.entries():
-                if len(ln.fields) > sc and ln.key and ln.fields[sc].strip():
-                    seen.add(ln.fields[sc])
-    found = suggest_terms(sorted(seen), min_count)
+            loc = _read_loc(p, cfg)
+            seen.update(text for _, text in localisation.source_entries(loc, src_name))
+    found = suggest_terms(sorted(seen), min_count, game=get_profile(cfg).id)
     out = cfg["translate"]["output_dir"]
     out.mkdir(parents=True, exist_ok=True)
     dest = out / "termos_sugeridos.txt"
@@ -491,17 +502,64 @@ def struct_warnings(src: str, dst: str) -> list[str]:
     return w
 
 
-def _translation_pairs(cfg: dict, mod: Mod) -> list[tuple[Path, Path]]:
+_MANIFEST_NAME = "translation_manifest.json"
+
+
+def _translation_directory(cfg: dict, mod: Mod) -> Path:
     tr = cfg["translate"]
     if tr["mode"] == "overlay":
-        directory = tr["output_dir"] / f"{mod.slug}_ptbr" / "localisation"
-    else:
-        directory = tr["output_dir"] / "backup" / mod.slug / "localisation"
+        return tr["output_dir"] / f"{mod.slug}_ptbr" / "localisation"
+    return tr["output_dir"] / "backup" / mod.slug / "localisation"
+
+
+def _generated_files(cfg: dict, directory: Path) -> list[Path]:
     if not directory.is_dir():
         return []
-    files = sorted(p for p in directory.iterdir() if p.is_file() and p.suffix.lower() == ".csv")
-    return ([(mod.loc_dir / p.name, p) for p in files] if tr["mode"] == "overlay"
-            else [(p, mod.loc_dir / p.name) for p in files])
+    profile = get_profile(cfg)
+    paths = directory.rglob("*") if profile.recursive else directory.iterdir()
+    return sorted(p for p in paths if p.is_file() and p.suffix.lower() == profile.suffix)
+
+
+def _read_manifest(cfg: dict, directory: Path) -> set[str]:
+    manifest = directory.parent / _MANIFEST_NAME
+    if not manifest.exists():
+        return set()  # Traduções antigas continuam verificáveis.
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("version") != 1
+                or data.get("game") != get_profile(cfg).id or not isinstance(data.get("files"), list)):
+            raise ValueError("versão, perfil ou lista de arquivos inválidos")
+        for name in data["files"]:
+            if (not isinstance(name, str) or not name or "\\" in name or ":" in name
+                    or any(ord(char) < 32 for char in name) or PurePosixPath(name).is_absolute()
+                    or any(part in ("", ".", "..") for part in name.split("/"))
+                    or PurePosixPath(name).suffix.lower() != get_profile(cfg).suffix):
+                raise ValueError("caminho de arquivo inválido")
+        return set(data["files"])
+    except (ValueError, UnicodeError) as error:
+        raise ConfigError(f"Manifesto inválido em {manifest}: {error}") from error
+
+
+def _write_manifest(cfg: dict, mod: Mod) -> None:
+    directory = _translation_directory(cfg, mod)
+    # Mantém a lista anterior para que uma execução parcial não esconda um
+    # arquivo apagado fora do tradutor. Arquivos regenerados voltam a existir.
+    files = _read_manifest(cfg, directory)
+    files.update(path.relative_to(directory).as_posix() for path in _generated_files(cfg, directory))
+    data = {"version": 1, "game": get_profile(cfg).id, "files": sorted(files)}
+    atomic_write(directory.parent / _MANIFEST_NAME,
+                 (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+def _translation_pairs(cfg: dict, mod: Mod) -> list[tuple[Path, Path]]:
+    tr = cfg["translate"]
+    directory = _translation_directory(cfg, mod)
+    files = set(_generated_files(cfg, directory))
+    if tr["mode"] == "overlay":
+        files.update(directory / name for name in _read_manifest(cfg, directory))
+    files = sorted(files)
+    return ([(mod.loc_dir / p.relative_to(directory), p) for p in files] if tr["mode"] == "overlay"
+            else [(p, mod.loc_dir / p.relative_to(directory)) for p in files])
 
 
 def cmd_diff(cfg: dict, mods: list[Mod], find: str | None) -> int:
@@ -512,22 +570,25 @@ def cmd_diff(cfg: dict, mods: list[Mod], find: str | None) -> int:
         for src_path, dst_path in _translation_pairs(cfg, mod):
             if not src_path.exists() or not dst_path.exists():
                 continue
-            src, dst = LocFile.read(src_path), LocFile.read(dst_path)
+            src, dst = _read_loc(src_path, cfg), _read_loc(dst_path, cfg)
             head = f"\n=== {mod.name} / {dst_path.name}  (encoding original: {src.encoding}, traduzido: {dst.encoding})"
             printed_head = False
             if len(src.lines) != len(dst.lines):
                 print(head + f"\n  ! número de linhas difere: {len(src.lines)} -> {len(dst.lines)}")
                 continue
-            sc = src.columns[src_col]
             for n, (a, b) in enumerate(zip(src.lines, dst.lines), start=1):
-                if not (a.is_entry and b.is_entry) or len(a.fields) <= sc:
+                if not (a.is_entry and b.is_entry):
+                    continue
+                ta = localisation.cell(src, a, src_col)
+                if ta is None:
                     continue
                 for column in tr["write_columns"]:
-                    ci = dst.columns[column]
-                    if ci >= len(b.fields) or (ci < len(a.fields) and a.fields[ci] == b.fields[ci]):
+                    tb = localisation.cell(dst, b, column)
+                    if tb is None or localisation.cell(src, a, column) == tb:
                         continue
-                    ta, tb = a.fields[sc], b.fields[ci]
                     warns = struct_warnings(ta, tb)
+                    if get_profile(cfg).id == "eu4":
+                        warns.extend(w for w in localisation.hard_problems(ta, tb, "eu4") if w not in warns)
                     hit = find and any(find.lower() in x.lower() for x in (a.key, ta, tb))
                     if not (hit if find else warns):
                         continue
@@ -558,9 +619,11 @@ def cmd_verify(cfg: dict, mods: list[Mod]) -> int:
                 print(f"  FALTA: {src_path if not src_path.exists() else dst_path}")
                 problems_total += 1
                 continue
-            src, dst = LocFile.read(src_path), LocFile.read(dst_path)
-            target = {src.columns[n] for n in tr["write_columns"]}
-            probs = compare(src, dst, target, src.columns[tr["source_column"]])
+            try:
+                src, dst = _read_loc(src_path, cfg), _read_loc(dst_path, cfg)
+                probs = localisation.compare(src, dst, tr["source_column"], tr["write_columns"])
+            except ConfigError as error:
+                probs = [str(error)]
             checked += 1
             problems_total += len(probs)
             print(f"  {'OK ' if not probs else 'ERRO'} {dst_path.name}")
@@ -584,12 +647,15 @@ def _positive_int(value: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Tradutor de mods do Crusader Kings II para português do Brasil.")
+    ap = argparse.ArgumentParser(description="Tradutor de mods Paradox (CK2 e EU4) para português do Brasil.")
     ap.add_argument("--version", action="version", version=f"CK2 Tradutor {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("argos-setup", help="baixa o pacote de idiomas en->pt do Argos (uma vez só, precisa de internet)")
     for name in ("scan", "translate", "verify", "terms", "diff", "status", "package"):
-        sp = sub.add_parser(name)
+        if name == "verify":
+            sp = sub.add_parser(name, aliases=["check"], help="verifica os arquivos traduzidos (também: check)")
+        else:
+            sp = sub.add_parser(name)
         sp.add_argument("--config", default="config.toml")
         sp.add_argument("--mod", help="traduz só os mods cujo nome contém este trecho")
         if name == "diff":
@@ -638,7 +704,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         return cmd_terms(cfg, mods, args.min_count)
     if args.cmd == "diff":
         return cmd_diff(cfg, mods, args.find)
-    if args.cmd == "verify":
+    if args.cmd in ("verify", "check"):
         return cmd_verify(cfg, mods)
     if args.cmd == "status":
         return cmd_status(cfg, mods, args.backend)

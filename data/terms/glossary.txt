@@ -1,0 +1,3 @@
+# Termo = Tradução   (uma regra por linha; # é comentário)
+# Glossário específico para Game of Thrones
+# Validação com contexto do universo de ASOIAF

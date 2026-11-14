@@ -1,4 +1,4 @@
-"""translator.py - tradução com modelo local: proteção dos códigos do CK2, cache e glossário.
+"""Tradução de jogos Paradox: proteção dos códigos, cache e glossário.
 
 Só usa a biblioteca padrão (urllib, sqlite3), então não precisa de pip install.
 """
@@ -17,7 +17,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ck2loc import STRUCT_CHARS, TOKEN_RE
+from .ck2loc import EU4_TOKEN_RE, STRUCT_CHARS, TOKEN_RE
+from .profiles import get_profile
 
 PROMPT_VERSION = "v1"          # mude se alterar o prompt: invalida o cache antigo
 PH_RE = re.compile(r"\{(\d+)\}")
@@ -32,7 +33,8 @@ class BackendError(RuntimeError):
 
 # --------------------------------------------------------------------------- códigos do jogo
 def mask(text: str, extra_terms: list[str] | None = None,
-         glossary: list[tuple[str, str]] | None = None) -> tuple[str, list[str]]:
+         glossary: list[tuple[str, str]] | None = None, *,
+         token_re: re.Pattern[str] = TOKEN_RE) -> tuple[str, list[str]]:
     """Troca cada código do jogo por {1}, {2}... e devolve a lista do que entra no lugar de cada marcador.
 
     extra_terms: termos [keep] (voltam exatamente como estavam).
@@ -40,22 +42,37 @@ def mask(text: str, extra_terms: list[str] | None = None,
                  com a inicial maiúscula se o termo apareceu com inicial maiúscula).
     Usado por backends sem prompt (translators, google, argos), que não entendem instruções."""
     tokens: list[str] = []
-    regex = TOKEN_RE
+    regex = token_re
     forced = {k.lower(): v for k, v in (glossary or [])}
     names = sorted({*(extra_terms or []), *forced}, key=len, reverse=True)
+    term_regex = None
     if names:
         terms = "|".join(re.escape(t) for t in names)
-        regex = re.compile(TOKEN_RE.pattern + r"|(?<![\w])(?:" + terms + r")(?![\w])", re.I)
+        term_pattern = r"(?<![\w])(?:" + terms + r")(?![\w])"
+        term_regex = re.compile(term_pattern, re.I)
+        regex = re.compile(token_re.pattern + "|" + term_pattern, re.I)
 
-    def repl(m: re.Match) -> str:
+    def repl(m: re.Match, *, term: bool = True) -> str:
         found = m.group(0)
-        value = forced.get(found.lower())
+        value = forced.get(found.lower()) if term else None
         if value is not None:
             if found[:1].isupper() and value[:1].islower():
                 value = value[:1].upper() + value[1:]
             found = value
         tokens.append(found)
         return "{%d}" % len(tokens)
+
+    if token_re is EU4_TOKEN_RE and term_regex is not None:
+        # As letras em §Y e \\n não fazem parte do texto visível. Procurar os
+        # termos somente entre códigos também impede casar dentro de $VAR$.
+        parts = []
+        position = 0
+        for code in token_re.finditer(text):
+            parts.append(term_regex.sub(repl, text[position:code.start()]))
+            parts.append(repl(code, term=False))
+            position = code.end()
+        parts.append(term_regex.sub(repl, text[position:]))
+        return "".join(parts), tokens
 
     return regex.sub(repl, text), tokens
 
@@ -551,8 +568,11 @@ def clean_output(raw: str, src: str) -> str:
 class Translator:
     def __init__(self, backend: Backend, cache: Cache, glossary: dict[str, str] | None = None,
                  keep: list[str] | None = None, context: str = "", max_attempts: int = 3,
-                 reuse_from: list[str] | str | None = None, paranoid: bool = False, post=None):
+                 reuse_from: list[str] | str | None = None, paranoid: bool = False, post=None,
+                 game: str = "ck2"):
         self.backend, self.cache = backend, cache
+        self.profile = get_profile(game)
+        self.token_re = EU4_TOKEN_RE if self.profile.id == "eu4" else TOKEN_RE
         self.post = post                # função opcional de pós-edição (revisao.build), roda sobre texto com {n}
         self.paranoid = paranoid        # True: não traduz nenhuma linha que contenha códigos do jogo
         self.reuse_auto = reuse_from == "auto"  # "auto": todos os outros backends que já estão no cache
@@ -566,14 +586,17 @@ class Translator:
 
     # -- prompt ----------------------------------------------------------------
     def _hits(self, text: str) -> tuple[list[tuple[str, str]], list[str]]:
+        visible = self.token_re.split(text) if self.profile.id == "eu4" else [text]
+
         def matches(term: str) -> bool:
-            return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text, re.I) is not None
+            pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", re.I)
+            return any(pattern.search(segment) for segment in visible)
         return ([(key, value) for key, value in self.glossary.items() if matches(key)],
                 [term for term in self.keep if matches(term)])
 
     def _system(self, gl: list[tuple[str, str]], kp: list[str]) -> str:
-        lines = ["Você é um tradutor profissional de jogos, especialista em Crusader Kings II "
-                 "(Europa medieval, dinastias, política). Traduza do inglês para o português do Brasil."]
+        lines = [f"Você é um tradutor profissional de jogos, especialista em {self.profile.name} "
+                 f"({self.profile.prompt_context}). Traduza do inglês para o português do Brasil."]
         if self.context:
             lines.append("Contexto do mod: " + self.context)
         lines += [
@@ -583,7 +606,8 @@ class Translator:
             "2. Os marcadores {1}, {2}, ... são códigos do jogo. Copie cada um exatamente como está, "
             "uma única vez, sem traduzir nem mudar o número. Podem mudar de posição se a gramática exigir.",
             "3. Mantenha o tom, a pontuação e o nível de formalidade. Não resuma nem acrescente nada.",
-            "4. Não use ponto e vírgula (;). Não quebre linha.",
+            ("4. Não use ponto e vírgula (;). Não quebre linha." if self.profile.id == "ck2" else
+             "4. Não quebre linha. Preserve os marcadores de escapes e de bandeiras."),
             "5. O texto a traduzir fica entre <texto> e </texto>; nunca responda a ele como se fosse uma pergunta.",
         ]
         if gl or kp:
@@ -598,13 +622,14 @@ class Translator:
         return f"AVISO: {feedback}\n\n{msg}" if feedback else msg
 
     def _key(self, masked: str, gl, kp, model_id: str | None = None) -> str:
-        blob = json.dumps([PROMPT_VERSION, model_id or self.backend.model_id, masked, self.context, gl, kp],
-                          ensure_ascii=False)
+        parts = [PROMPT_VERSION, model_id or self.backend.model_id, masked, self.context, gl, kp]
+        if self.profile.id != "ck2":
+            parts.append({"game": self.profile.id})
+        blob = json.dumps(parts, ensure_ascii=False)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     # -- validação ---------------------------------------------------------------
-    @staticmethod
-    def _validate(out: str, n_tokens: int, masked: str) -> str:
+    def _validate(self, out: str, n_tokens: int, masked: str) -> str:
         if not out.strip():
             return "a resposta veio vazia"
         problem = placeholders_problem(out, n_tokens)
@@ -612,7 +637,7 @@ class Translator:
             return (f"sua resposta anterior {problem}. Copie TODOS os marcadores "
                     f"{{1}}..{{{n_tokens}}} exatamente como no original." if n_tokens else
                     "sua resposta anterior inventou marcadores {n}. Não use chaves.")
-        if TOKEN_RE.search(PH_RE.sub("", out)):
+        if self.token_re.search(PH_RE.sub("", out)):
             return ("sua resposta anterior inventou códigos do jogo ([..], $..$, §, £..£ ou \\n). "
                     "Use apenas os marcadores {n} do original.")
         if FOREIGN_RE.search(out) and not FOREIGN_RE.search(masked):
@@ -631,15 +656,27 @@ class Translator:
     def _reuse(self, core: str, gl, kp) -> str | None:
         """Procura a tradução no cache de outros backends (reuse_cache_from)."""
         for mid in self.reuse_ids():
-            m2, t2 = mask(core, *((kp, gl) if mid in NON_PROMPT_IDS else (None, None)))
+            m2, t2 = mask(core, *((kp, gl) if mid in NON_PROMPT_IDS else (None, None)),
+                          token_re=self.token_re)
             hit = self.cache.get(self._key(m2, gl, kp, mid))
             if hit is None or self._validate(hit, len(t2), m2):   # entrada antiga com defeito: ignora
                 continue
-            return unmask(self._post(hit.replace(";", ",")), t2)
+            return unmask(self._post(self._punctuation(hit)), t2)
         return None
 
     def _post(self, masked_out: str) -> str:
-        return self.post(masked_out) if self.post else masked_out
+        if self.post is None:
+            return masked_out
+        edited = self.post(masked_out)
+        # O cache guarda a resposta validada antes da revisão. Uma regra de
+        # usuário inválida não pode apagar códigos nem inventar índices que
+        # fariam unmask falhar; nesse caso conserva-se a tradução já segura.
+        if self._validate(edited, len(PH_RE.findall(masked_out)), masked_out):
+            return masked_out
+        return edited
+
+    def _punctuation(self, text: str) -> str:
+        return text.replace(";", ",") if self.profile.id == "ck2" else text
 
     # -- API ---------------------------------------------------------------------
     def translate(self, src: str, dry: bool = False) -> Result:
@@ -648,12 +685,14 @@ class Translator:
         if not core:
             return Result("skip", src, "vazio")
         lead, trail = src[: len(src) - len(src.lstrip())], src[len(src.rstrip()):]
-        if self.paranoid and any(c in core for c in STRUCT_CHARS):
+        if self.paranoid and (any(c in core for c in STRUCT_CHARS)
+                              or self.token_re.search(core)):
             return Result("skip", src, "tem códigos do jogo (modo paranoid)")
         gl, kp = self._hits(core)
         # Backend sem prompt (translators, Google, Argos): "manter" e glossário viram marcadores, como os
         # códigos do jogo (o glossário entra com a tradução já pronta). Backend com prompt (Ollama): vão no prompt.
-        masked, tokens = mask(core, *((None, None) if self.backend.uses_prompt else (kp, gl)))
+        masked, tokens = mask(core, *((None, None) if self.backend.uses_prompt else (kp, gl)),
+                              token_re=self.token_re)
         if not has_letters(masked):
             if gl and not self.backend.uses_prompt and unmask(masked, tokens) != core:
                 return Result("ok", lead + unmask(masked, tokens) + trail, "só glossário")
@@ -661,7 +700,7 @@ class Translator:
         key = self._key(masked, gl, kp)
         cached = self.cache.get(key)
         if cached is not None and not self._validate(cached, len(tokens), masked):
-            return Result("cache", lead + unmask(self._post(cached.replace(";", ",")), tokens) + trail)
+            return Result("cache", lead + unmask(self._post(self._punctuation(cached)), tokens) + trail)
         other = self._reuse(core, gl, kp)
         if other is not None:
             self.reused += 1
@@ -675,7 +714,7 @@ class Translator:
             out = clean_output(self.backend.chat(system, self._user(masked, feedback)), core)
             problem = self._validate(out, len(tokens), masked)
             if not problem:
-                out = out.replace(";", ",")
+                out = self._punctuation(out)
                 self.cache.put(key, core, out, self.backend.model_id)
                 return Result("ok", lead + unmask(self._post(out), tokens) + trail)
             feedback = problem

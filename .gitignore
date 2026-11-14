@@ -1,5 +1,6 @@
 # Configuração local, credenciais e variáveis de ambiente
 /config.toml
+/config.eu4.toml
 /config.local*.toml
 .env
 .env.*
@@ -7,6 +8,7 @@
 
 # Traduções, relatórios, backups e mods originais
 /saida/
+/saida_eu4/
 /output/
 /mods/
 /a game of thrones/
@@ -16,6 +18,7 @@
 /termos_sugeridos.txt
 
 # Cache de tradução e arquivos auxiliares do SQLite
+/data/cache/
 *.sqlite
 *.sqlite3
 *.db

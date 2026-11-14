@@ -47,10 +47,12 @@ def read_glossary(path: Path) -> dict[str, str]:
 
 def collect(base: Path, cfg_paths, default_name: str) -> list[Path]:
     """Arquivos a ler: os listados na config (string ou lista, relativos à pasta da config);
-    se nada foi listado, o arquivo padrão (keep.txt / glossary.txt) quando existir."""
+    sem caminho explícito, prefere o arquivo legado e depois data/terms."""
     if cfg_paths is None:
-        p = base / default_name
-        return [p] if p.exists() else []
+        for path in (base / default_name, base / "data" / "terms" / default_name):
+            if path.is_file():
+                return [path]
+        return []
     if isinstance(cfg_paths, str):
         cfg_paths = [cfg_paths] if cfg_paths.strip() else []      # "" = não usar arquivo
     return [(base / Path(p).expanduser()).resolve() for p in cfg_paths]

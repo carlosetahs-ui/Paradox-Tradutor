@@ -1,10 +1,11 @@
-"""glossario_do_cache.py - sugere [keep] e [glossary] a partir do cache.sqlite já traduzido.
+"""Sugere [keep] e [glossary] a partir do cache de tradução existente.
 
-Uso:   python glossario_do_cache.py                      (lê cache.sqlite)
-       python glossario_do_cache.py cache.sqlite --min 4
+Uso:   python glossario_do_cache.py                      (lê data/cache/cache.sqlite)
+       python glossario_do_cache.py outro/cache.sqlite --min 4
+Um cache.sqlite existente na pasta atual tem prioridade, para compatibilidade.
 
-Não altera nada: grava saida/keep_sugerido.txt e saida/glossary_sugerido.txt e mostra o resultado na tela.
-Revise, apague/ative linhas e salve como keep.txt e glossary.txt (ao lado do config.toml).
+Mantém o cache intacto: grava saida/keep_sugerido.txt e saida/glossary_sugerido.txt.
+Revise as sugestões e salve os termos aprovados em data/terms/keep.txt e glossary.txt.
 
   [keep]      nomes próprios que o tradutor deixou iguais na maioria das vezes (ou que
               deveriam ficar iguais): casas, lugares, pessoas.
@@ -46,7 +47,8 @@ def tokens(s: str) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cache", nargs="?", default="cache.sqlite")
+    default_cache = "cache.sqlite" if Path("cache.sqlite").is_file() else "data/cache/cache.sqlite"
+    ap.add_argument("cache", nargs="?", default=default_cache)
     ap.add_argument("--min", type=int, default=3, help="mínimo de ocorrências (padrão 3)")
     ap.add_argument("--out", default="saida", help="pasta onde gravar keep_sugerido.txt e glossary_sugerido.txt")
     a = ap.parse_args(argv)
@@ -54,9 +56,11 @@ def main(argv: list[str] | None = None) -> int:
     if not Path(a.cache).exists():
         print(f"Não achei {a.cache}. Rode na pasta do projeto ou passe o caminho.")
         return 1
-    db = sqlite3.connect(f"file:{a.cache}?mode=ro", uri=True)
-    rows = db.execute("SELECT src, dst FROM cache WHERE model != 'echo' AND src != dst").fetchall()
-    db.close()
+    db = sqlite3.connect(Path(a.cache).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        rows = db.execute("SELECT src, dst FROM cache WHERE model != 'echo' AND src != dst").fetchall()
+    finally:
+        db.close()
     if not rows:
         print("Cache vazio (ou só com o backend de teste).")
         return 1

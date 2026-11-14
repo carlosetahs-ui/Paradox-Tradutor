@@ -23,6 +23,14 @@ TOKEN_RE = re.compile(
     r"|\{[^{}]*\}"                   # {qualquer coisa} usada por alguns mods
 )
 
+# O EU4 também usa bandeiras @TAG / @[Root.GetTag] e escapes de aspas e
+# barras. O padrão CK2 fica intacto para preservar o cache e os CSV legados.
+EU4_TOKEN_RE = re.compile(
+    TOKEN_RE.pattern
+    + r"|@(?:[A-Z0-9]{3}(?![A-Za-z0-9_])|\[[^\[\]\r\n]+\])"
+    + r"|\\[^\r\n]"
+)
+
 # Caracteres que o jogo interpreta. A QUANTIDADE de cada um não pode mudar na tradução.
 STRUCT_CHARS = "[]$\u00a7\u00a3{}\\"
 

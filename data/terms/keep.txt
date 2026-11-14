@@ -1,0 +1,2 @@
+# Nomes que não devem ser traduzidos (um por linha)
+

@@ -1,0 +1,56 @@
+# Copie este exemplo para config.eu4.toml NA RAIZ do projeto e ajuste [[mods]].
+# Caminhos relativos partem desta pasta; no Windows, use aspas simples nos caminhos.
+# Comandos na raiz, depois de copiar e ajustar config.eu4.toml:
+# Tradução:   python ck2tr.py translate --config config.eu4.toml
+# Check:      python ck2tr.py check --config config.eu4.toml
+# Scan:       python ck2tr.py scan --config config.eu4.toml
+# Teste de 30 textos: python ck2tr.py translate --config config.eu4.toml --limit 30
+# check verifica a estrutura da tradução; verify também continua disponível.
+
+[game]
+id = "eu4"
+# Opcional: a versão compatível que você verificou no jogo; não é preenchida automaticamente.
+# supported_version = "1.xx.*" # substitua xx pela versão do seu jogo
+
+[model]
+# echo não traduz: acrescenta PT> e testa o fluxo sem internet nem dependências opcionais.
+# Para traduzir, troque por translators | google | argos | ollama | openai.
+# Instalações e opções desses backends são as mesmas do exemplo CK2 e do README.
+backend = "echo"
+source_lang = "en"
+target_lang = "pt"
+# Exemplo offline real: python -m pip install -e ".[argos]"
+# Depois: python ck2tr.py argos-setup; altere backend para "argos".
+# Para ollama/openai, configure também name e host como em examples/config.ck2.toml.
+
+[translate]
+# EU4 usa um idioma nativo para exibir PT-BR. Cabeçalho e nome do YML são preservados.
+# source_column e write_columns devem indicar o mesmo idioma. Selecione inglês no jogo.
+source_column = "english"
+write_columns = ["english"]
+mode = "overlay"           # obrigatório no EU4: gera um mod separado
+output_dir = "saida_eu4"
+cache = "data/cache/cache.sqlite" # pode compartilhar o banco CK2; chaves separadas por jogo
+reuse_cache_from = "auto"  # reaproveita outros backends dentro do mesmo perfil
+workers = 1
+safety = "strict"          # normal | strict | paranoid
+skip_files = []            # padrões, ex.: ["*_l_french.yml", "replace/*"]
+context = "Mod histórico de Europa Universalis IV."
+
+# Para seus termos EU4, indique outro arquivo ou uma lista de arquivos.
+keep_file = "data/terms/keep.txt"
+glossary_file = "data/terms/glossary.txt"
+replace_file = "data/terms/substituicoes.txt"
+ptbr_fix = true
+
+[[mods]]
+name = "Meu Mod EU4"       # nome EXATO do descritor original, usado como dependência
+path = 'mods/meu_mod_eu4'  # pasta que contém localisation e, normalmente, descriptor.mod
+# Sem name, tenta obter o nome de descriptor.mod. Também aceita um descritor explícito:
+# mod_file = 'mods/meu_mod_eu4.mod'
+
+[glossary]
+# "Trade Power" = "Poder comercial"
+
+[keep]
+# terms = ["Habsburg"]

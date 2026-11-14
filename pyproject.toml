@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ck2-mod-translator"
 dynamic = ["version"]
-description = "Tradutor de mods do Crusader Kings II para português do Brasil"
+description = "Tradutor de mods Paradox (CK2 e EU4) para português do Brasil"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
