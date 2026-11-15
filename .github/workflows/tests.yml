@@ -8,6 +8,8 @@ jobs:
   unittest:
     name: Python ${{ matrix.python }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -20,5 +22,33 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Executar testes offline
         run: python -m unittest discover -v
+      - name: Conferir temporários com caminhos abreviados no Windows
+        if: runner.os == 'Windows'
+        shell: python
+        run: |
+          import ctypes
+          import os
+          import subprocess
+          import sys
+          import tempfile
+
+          with tempfile.TemporaryDirectory(prefix="Paradox CI Temporary Paths ") as directory:
+              get_short = ctypes.windll.kernel32.GetShortPathNameW
+              get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+              get_short.restype = ctypes.c_uint
+              buffer = ctypes.create_unicode_buffer(32768)
+              size = get_short(directory, buffer, len(buffer))
+              if not size or size >= len(buffer):
+                  raise ctypes.WinError()
+              if buffer.value == directory:
+                  print("Nomes abreviados indisponíveis neste volume; teste normal já executado.")
+              else:
+                  environment = os.environ.copy()
+                  environment["TEMP"] = environment["TMP"] = buffer.value
+                  subprocess.run(
+                      [sys.executable, "-m", "unittest", "tests.test_layout", "-v"],
+                      env=environment,
+                      check=True,
+                  )
       - name: Conferir entrada do programa
         run: python -m ck2translator --version

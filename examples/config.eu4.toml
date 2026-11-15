@@ -1,11 +1,44 @@
 # Copie este exemplo para config.eu4.toml NA RAIZ do projeto e ajuste [[mods]].
 # Caminhos relativos partem desta pasta; no Windows, use aspas simples nos caminhos.
 # Comandos na raiz, depois de copiar e ajustar config.eu4.toml:
-# Tradução:   python ck2tr.py translate --config config.eu4.toml
-# Check:      python ck2tr.py check --config config.eu4.toml
-# Scan:       python ck2tr.py scan --config config.eu4.toml
-# Teste de 30 textos: python ck2tr.py translate --config config.eu4.toml --limit 30
-# check verifica a estrutura da tradução; verify também continua disponível.
+# python ck2tr.py translate --config config.eu4.toml   # traduz os mods configurados; reaproveita o cache.
+# python ck2tr.py check --config config.eu4.toml   # confere estrutura, códigos e arquivos da tradução.
+# python ck2tr.py scan --config config.eu4.toml   # analisa os arquivos originais sem traduzir nem gravar.
+#
+# Outros comandos:
+# python ck2tr.py status --config config.eu4.toml   # mostra o que está no cache e quanto falta; sem tradução.
+# python ck2tr.py verify --config config.eu4.toml   # faz a mesma verificação de check.
+# python ck2tr.py diff --config config.eu4.toml   # mostra original e tradução nas linhas com avisos.
+# python ck2tr.py diff --config config.eu4.toml --find "trecho ou chave"   # procura esse texto na chave, original ou tradução.
+# python ck2tr.py terms --config config.eu4.toml   # gera sugestões de nomes para preservar no keep.
+# python ck2tr.py terms --config config.eu4.toml --min-count 3   # sugere nomes com pelo menos 3 ocorrências.
+# python ck2tr.py package --config config.eu4.toml   # verifica e gera ZIP da tradução; exige overlay.
+#
+# Opções de execução (os exemplos podem ser combinados quando compatíveis):
+# python ck2tr.py translate --config config.eu4.toml --limit 30   # traduz só os primeiros 30 textos únicos de cada mod.
+# python ck2tr.py translate --config config.eu4.toml --mod "parte do nome"   # seleciona os mods cujo nome contém esse trecho.
+# python ck2tr.py translate --config config.eu4.toml --backend echo   # testa o fluxo sem traduzir; acrescenta PT>.
+# python ck2tr.py translate --config config.eu4.toml --backend argos   # usa Argos nesta execução; exige pacote instalado.
+# python ck2tr.py status --config config.eu4.toml --backend argos   # consulta o que falta para Argos sem carregar o motor.
+# python ck2tr.py translate --config config.eu4.toml --mode overlay   # gera mod separado, preservando o original.
+#
+# Ferramentas e ajuda:
+# python ck2tr.py argos-setup   # baixa e instala o pacote en -> pt do Argos; uma vez.
+# python glossario_do_cache.py data/cache/cache.sqlite --min 4 --out saida_eu4   # gera keep/glossário sugeridos; revise antes de usar.
+# python ck2tr.py --help   # lista os comandos disponíveis.
+# python ck2tr.py translate --help   # mostra as opções; substitua translate por outro comando.
+# python ck2tr.py --version   # mostra a versão instalada.
+# python -m ck2translator translate --config config.eu4.toml   # entrada alternativa, equivalente a ck2tr.py.
+# ck2tr translate --config config.eu4.toml   # mesmo comando após instalar o projeto com pip.
+# ck2-glossario data/cache/cache.sqlite --min 4 --out saida_eu4   # atalho instalado da ferramenta glossario_do_cache.py.
+#
+# --config: escolhe o TOML; caminhos relativos partem da pasta desse arquivo.
+# --mod também funciona com scan, status, check, verify, terms, diff e package.
+# --backend existe em translate e status: translators | google | argos | ollama | openai | echo.
+# --mode existe em translate, check, verify e diff; EU4 aceita somente overlay.
+# --limit vale apenas para translate; --find apenas para diff; --min-count apenas para terms.
+# --limit reconstrói a saída dessa execução; para a tradução completa, rode sem --limit.
+# --min e --out acima pertencem à ferramenta de glossário (frequência mínima e pasta de saída).
 
 [game]
 id = "eu4"

@@ -15,7 +15,7 @@ class LayoutCompatibilityTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.terms = self.root / "data" / "terms"
         self.terms.mkdir(parents=True)
 

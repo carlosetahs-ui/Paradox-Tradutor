@@ -219,11 +219,13 @@ def resolve_mods(cfg: dict, only: str | None) -> list[Mod]:
     if profile.id == "eu4" and cfg["translate"]["mode"] != "overlay":
         raise ConfigError("EU4 exige translate.mode = 'overlay' para gerar um mod de tradução separado.")
     mods = []
+    original_paths = []
     for entry in cfg["mods"]:
         path = _path(cfg["_base"], entry["path"], "mods.path")
         if not (path / "localisation").is_dir():
             print(f"AVISO: '{path}' não tem pasta localisation; ignorado.")
             continue
+        original_paths.append(path)
         name = entry.get("name")
         if not name and entry.get("mod_file"):
             name = _read_mod_name(_path(cfg["_base"], entry["mod_file"], "mods.mod_file"))
@@ -245,7 +247,7 @@ def resolve_mods(cfg: dict, only: str | None) -> list[Mod]:
         slugs.add(mod.slug)
         target = (cfg["translate"]["output_dir"] / f"{mod.slug}_ptbr").resolve()
         if cfg["translate"]["mode"] == "overlay" and any(
-                target == original.path or target.is_relative_to(original.path)
-                or original.path.is_relative_to(target) for original in mods):
+                target == original or target.is_relative_to(original)
+                or original.is_relative_to(target) for original in original_paths):
             raise ConfigError(f"A saída de {mod.name} coincide ou se sobrepõe a um mod original. Mude translate.output_dir.")
     return mods

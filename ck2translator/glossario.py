@@ -53,14 +53,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default="saida", help="pasta onde gravar keep_sugerido.txt e glossary_sugerido.txt")
     a = ap.parse_args(argv)
 
-    if not Path(a.cache).exists():
+    if not Path(a.cache).is_file():
         print(f"Não achei {a.cache}. Rode na pasta do projeto ou passe o caminho.")
         return 1
-    db = sqlite3.connect(Path(a.cache).resolve().as_uri() + "?mode=ro", uri=True)
     try:
-        rows = db.execute("SELECT src, dst FROM cache WHERE model != 'echo' AND src != dst").fetchall()
-    finally:
-        db.close()
+        db = sqlite3.connect(Path(a.cache).resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = db.execute("SELECT src, dst FROM cache WHERE model != 'echo' AND src != dst").fetchall()
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error) as error:
+        print(f"ERRO ao ler o cache {a.cache}: {error}", file=sys.stderr)
+        return 2
     if not rows:
         print("Cache vazio (ou só com o backend de teste).")
         return 1

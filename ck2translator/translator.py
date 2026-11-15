@@ -132,7 +132,13 @@ def _post_json(url: str, payload: dict, timeout: float, headers: dict | None = N
     for attempt in range(retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                try:
+                    result = json.loads(resp.read().decode("utf-8"))
+                except (UnicodeError, ValueError) as error:
+                    raise BackendError(f"Resposta JSON inválida de {url}: {error}") from error
+                if not isinstance(result, dict):
+                    raise BackendError(f"Resposta inesperada de {url}: esperado um objeto JSON.")
+                return result
         except urllib.error.HTTPError as e:                 # 404 modelo inexistente, 500...
             body = e.read().decode("utf-8", errors="replace")[:300]
             raise BackendError(f"HTTP {e.code} em {url}: {body}") from e
@@ -165,8 +171,11 @@ class OllamaBackend(Backend):
                    "options": {"temperature": self.temperature}}
         resp = _post_json(f"{self.host}/api/chat", payload, self.timeout)
         try:
-            return resp["message"]["content"]
-        except (KeyError, TypeError) as e:
+            content = resp["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("conteúdo de tradução ausente ou inválido")
+            return content
+        except (KeyError, TypeError, ValueError) as e:
             raise BackendError(f"resposta inesperada do Ollama: {str(resp)[:200]}") from e
 
 
@@ -185,8 +194,11 @@ class OpenAICompatBackend(Backend):
                                 {"role": "user", "content": user}]}
         resp = _post_json(f"{self.host}/chat/completions", payload, self.timeout, self.headers)
         try:
-            return resp["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as e:
+            content = resp["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("conteúdo de tradução ausente ou inválido")
+            return content
+        except (KeyError, IndexError, TypeError, ValueError) as e:
             raise BackendError(f"resposta inesperada do servidor: {str(resp)[:200]}") from e
 
 
@@ -240,14 +252,23 @@ class GoogleBackend(Backend):
     def _call(self, text: str) -> str:
         last: Exception | None = None
         for attempt in range(3):
-            try:
-                r = self.fn(text)
-                if r:
-                    return r
-            except Exception as e:
-                last = e
-            print(f"\n  Erro do Google, esperando {self.retry_wait * (attempt + 1):.0f}s...")
-            time.sleep(self.retry_wait * (attempt + 1))
+            # A chamada e a pausa pertencem ao mesmo pedido físico, incluindo
+            # trechos de textos longos e retries de workers diferentes.
+            with self.lock:
+                try:
+                    result = self.fn(text)
+                    if isinstance(result, str) and result.strip():
+                        return result
+                    last = BackendError("resposta vazia ou não textual")
+                except Exception as error:
+                    last = error
+                finally:
+                    self.count += 1
+                    time.sleep(self.long_pause if self.long_every and self.count % self.long_every == 0
+                               else random.uniform(*self.pause))
+            if attempt < 2:
+                print(f"\n  Erro do Google, esperando {self.retry_wait * (attempt + 1):.0f}s...")
+                time.sleep(self.retry_wait * (attempt + 1))
         raise BackendError(f"O Google não respondeu (provável bloqueio temporário): {last}. "
                            "O progresso foi salvo; espere um pouco e rode de novo.")
 
@@ -256,10 +277,6 @@ class GoogleBackend(Backend):
         text = PH_RE.sub(lambda x: f"XX{x.group(1)}XX", m.group(1) if m else user)
         out = " ".join(self._call(p) for p in split_text(text))
         out = re.sub(r"XX\s*(\d+)\s*XX", r"{\1}", out, flags=re.I)
-        with self.lock:
-            self.count += 1
-            time.sleep(self.long_pause if self.long_every and self.count % self.long_every == 0
-                       else random.uniform(*self.pause))
         return out
 
 

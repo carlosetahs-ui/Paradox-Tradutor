@@ -217,6 +217,7 @@ python -m ck2translator --help
 
 Os testes usam arquivos temporários e backends simulados, sem chamadas reais aos serviços.
 A integração contínua está configurada para Windows e Linux, com Python 3.11 e 3.14.
+No Windows, também verifica caminhos temporários abreviados (8.3), usados pelos runners do GitHub.
 Os backends opcionais dependem da compatibilidade de suas próprias bibliotecas com a versão do Python.
 
 Para adicionar um jogo, crie seu perfil em `profiles.py`, implemente o parser e registre o formato em
