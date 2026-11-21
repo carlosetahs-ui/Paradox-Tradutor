@@ -64,11 +64,22 @@ quebras de linha reais, `<think>`, cercas de código e caracteres fora do Window
 No EU4, bandeiras como `@FRA` e `@[Root.GetTag]` e escapes como `\"` e `\\` também são protegidos.
 Pontos e vírgulas são permitidos nos valores EU4, e o conteúdo não passa pela conversão Windows-1252.
 
+A validação também preserva a ordem dos códigos de cor e recusa trechos coloridos cujo conteúdo
+desapareceu. Não exige um `§!` novo quando a fonte usa `§W` como reset ou já contém cores abertas.
+Um `§` isolado existente na fonte também é protegido. Espaços perdidos entre marcadores e palavras
+são recuperados quando havia um separador no original; cores originalmente coladas ao texto continuam
+coladas. Essas regras também se aplicam ao cache e à pós-edição.
+
+Respostas que repetem palavras/frases consecutivas sem repetição equivalente na origem são rejeitadas.
+Uma heurística conservadora recusa prosa inglesa devolvida inteiramente igual à fonte. Ela ignora nomes
+preservados e termos do glossário; não detecta todo trecho parcialmente em inglês nem garante a correção
+gramatical. Se as tentativas falharem, a linha entra no relatório e conserva o original.
+
 **4b. Trava de segurança (`safety`).** O tradutor só altera o texto dos `.csv` ou `.yml`; nunca toca nos scripts do mod.
 Com `safety = "strict"` (padrão), antes de gravar cada linha ela é comparada com o original: se a quantidade de
 `[ ] $ § £ { } \\` mudar, se os códigos do jogo forem diferentes, se os espaços das pontas mudarem ou houver
 caracteres de controle, a linha **volta ao idioma original** e entra no relatório como `revertida`. Aspas e travessões
-"tipográficos" que o original não usava viram ASCII. `safety = "paranoid"` também não traduz nenhuma linha que tenha
+"tipográficos", incluindo `«»`, que o original não usava viram ASCII. `safety = "paranoid"` também não traduz nenhuma linha que tenha
 códigos do jogo. O `verify` aplica as mesmas regras. No EU4, a validação estrutural também é
 obrigatória em `normal`, para preservar os códigos e escapes do YML.
 
@@ -85,6 +96,12 @@ uma vez. Os termos fornecidos ficam em `data/terms/`
 - Casam sem diferenciar maiúsculas/minúsculas e só como palavra inteira (`King` não pega `Kingdom` nem `Kings`).
 - Se o termo estiver capitalizado no original ("The King") e a tradução começar em minúscula, a inicial sai maiúscula.
 
+Pedidos simultâneos para a mesma chave compartilham a tradução em vez de disputar a gravação no cache.
+Os títulos `Administrative Technology`, `Diplomatic Technology` e `Military Technology` seguidos de
+nível romano ou arábico usam a tradução do título base, com o nível recolocado no final. Isso fixa a
+capitalização e a posição do numeral da série sem aplicar uma regra genérica a descrições ou números
+no fim de frases. Um termo do glossário ou keep que abranja o título completo tem prioridade.
+
 Use, por exemplo, `keep_file = "data/terms/keep.txt"` e
 `glossary_file = "data/terms/glossary.txt"` na configuração da raiz. Se esses caminhos não forem
 configurados, os arquivos antigos ao lado da configuração têm prioridade; depois o programa procura
@@ -97,6 +114,11 @@ jogo) e **a tradução do glossário é colocada no lugar depois** — é imposi
 Cuidado: por isso um erro no glossário se repete em todas as linhas; revise antes de ativar.
 Os arquivos fornecidos são voltados a Game of Thrones. O exemplo EU4 os desativa: crie seus próprios
 arquivos ou use `[keep]` e `[glossary]` na configuração EU4.
+Para Elder Scrolls Universalis, há um exemplo completo em
+[`examples/config.eu4.esu.toml`](../examples/config.eu4.esu.toml), com termos como
+`Harvester = Colhedor`, `Mages Guild = Guilda dos Magos`, `High King = Alto Rei` e
+`Sacred Lake = Lago Sagrado`, além de Dunmer e nomes de deuses preservados.
+São escolhas editoriais específicas do mod e podem ser ajustadas na configuração.
 
 Os dois perfis usam os mesmos backends, a mesma classe de cache SQLite e o mesmo processamento de
 glossário e pós-edição. É possível apontar ambos para o mesmo banco, pois as chaves de tradução EU4
@@ -136,6 +158,12 @@ desligar com `ptbr_fix = false`. Você também pode listar correções em `data/
 (`errado = certo`) e apontar `replace_file` para esse arquivo.
 Isso roda SOBRE o texto com marcadores `{n}`, então códigos do jogo, `keep` e glossário nunca são tocados, e **não
 entra no cache**: mudar as regras vale na hora, sem retraduzir nada.
+Também cobre famílias de `activa/activar`, `sinónimo` e o uso nominal de `controlo`, preservando
+"eu controlo". Pronomes como `tu` e terminações como `-nos` exigem contexto e não são trocados cegamente.
+
+`diff` mostra avisos de repetições novas, aspas angulares desparelhadas e prosa inglesa inalterada,
+além dos avisos estruturais. `diff --find "texto ou chave"` também encontra entradas que não mudaram.
+`check` continua sendo a verificação estrutural; uma aprovação nele não garante qualidade linguística.
 
 ## Uso
 

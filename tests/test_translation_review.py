@@ -58,11 +58,11 @@ class TranslationReviewTests(unittest.TestCase):
         self.assertIn("Kingdom", masked)
         self.assertNotIn("$KING$", masked)
 
-    def test_ck2_colored_matching_and_mask_are_unchanged(self):
+    def test_ck2_colored_matching_uses_the_same_protection_as_eu4(self):
         translator = Translator(RecordingBackend(), self.enterContext(Cache()), {"Empire": "Império"})
-        self.assertEqual(translator._hits("§YEmpire§!"), ([], []))
+        self.assertEqual(translator._hits("§YEmpire§!"), ([("Empire", "Império")], []))
         self.assertEqual(mask("§YEmpire§!", glossary=[("Empire", "Império")]),
-                         ("{1}Empire{2}", ["§Y", "§!"]))
+                         ("{1}{2}{3}", ["§Y", "Império", "§!"]))
 
     def test_invalid_user_postprocessing_keeps_validated_translation(self):
         for game in ("ck2", "eu4"):

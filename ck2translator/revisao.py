@@ -26,6 +26,17 @@ PT_PARA_BR = {
     "acção": "ação", "acções": "ações", "direcção": "direção", "direcções": "direções",
     "protecção": "proteção", "reacção": "reação", "reacções": "reações", "correcção": "correção",
     "actual": "atual", "actuais": "atuais", "actualmente": "atualmente", "actividade": "atividade",
+    "activo": "ativo", "activos": "ativos", "activa": "ativa", "activas": "ativas",
+    "activar": "ativar", "activação": "ativação", "activações": "ativações",
+    "activado": "ativado", "activada": "ativada", "activados": "ativados", "activadas": "ativadas",
+    "activam": "ativam", "activou": "ativou", "activando": "ativando", "activamente": "ativamente",
+    "desactivar": "desativar", "desactiva": "desativa", "desactivas": "desativas",
+    "desactivação": "desativação", "desactivações": "desativações",
+    "desactivado": "desativado", "desactivada": "desativada",
+    "desactivados": "desativados", "desactivadas": "desativadas",
+    "desactivam": "desativam", "desactivou": "desativou", "desactivando": "desativando",
+    "sinónimo": "sinônimo", "sinónimos": "sinônimos", "sinónima": "sinônima", "sinónimas": "sinônimas",
+    "controlos": "controles",
     "actividades": "atividades", "actor": "ator", "actores": "atores", "óptimo": "ótimo",
     "óptima": "ótima", "objectivo": "objetivo", "objectivos": "objetivos", "projecto": "projeto",
     "projectos": "projetos", "arquitectura": "arquitetura", "espectáculo": "espetáculo",
@@ -90,9 +101,16 @@ def ptbr(text: str) -> str:
 _GENERO = _word_map({"o ecrã": "a tela", "do ecrã": "da tela", "no ecrã": "na tela", "ao ecrã": "à tela",
                      "um ecrã": "uma tela", "os ecrãs": "as telas", "dos ecrãs": "das telas", "nos ecrãs": "nas telas"})
 _WORDS = _word_map(PT_PARA_BR)
+# "Eu controlo" já é português brasileiro. Só se altera o singular quando
+# um determinante ou uma preposição identifica o uso como substantivo.
+_CONTROLO = re.compile(
+    r"\b(o|um|do|no|ao|pelo|este|esse|aquele|deste|desse|daquele|neste|nesse|naquele|"
+    r"meu|teu|seu|nosso|vosso|sob|de|com|sem)(\s+)(controlo)\b", re.I,
+)
 
 
 def _BASE(text: str) -> str:
+    text = _CONTROLO.sub(lambda m: m.group(1) + m.group(2) + _case_like(m.group(3), "controle"), text)
     return _WORDS(_GENERO(text))
 
 

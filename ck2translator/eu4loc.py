@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from .ck2loc import EU4_TOKEN_RE, STRUCT_CHARS
+from .ck2loc import EU4_TOKEN_RE, STRUCT_CHARS, color_problems
 from .files import atomic_write
 
 _HEADER_RE = re.compile(r"[ \t]*l_([A-Za-z0-9_]+):[ \t]*(?:#.*)?\Z")
@@ -98,6 +98,7 @@ def hard_problems(src: str, dst: str) -> list[str]:
             problems.append(f"quantidade de '{char}' mudou ({src.count(char)} -> {dst.count(char)})")
     if sorted(EU4_TOKEN_RE.findall(src)) != sorted(EU4_TOKEN_RE.findall(dst)):
         problems.append("códigos do jogo ou escapes diferentes")
+    problems.extend(color_problems(src, dst, EU4_TOKEN_RE))
     if (src[:len(src) - len(src.lstrip())] != dst[:len(dst) - len(dst.lstrip())]
             or src[len(src.rstrip()):] != dst[len(dst.rstrip()):]):
         problems.append("espaços no início/fim mudaram")

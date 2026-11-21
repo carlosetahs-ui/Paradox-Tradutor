@@ -30,6 +30,30 @@ class Regras(unittest.TestCase):
     def test_nao_mexe_em_parte_de_palavra(self):
         self.assertEqual(revisao.ptbr("factoria e equipamento"), "factoria e equipamento")
 
+    def test_grafias_de_ativacao_e_sinonimos(self):
+        self.assertEqual(
+            revisao.ptbr("Activa a habilidade. ACTIVOS: sinónimos e sinónimas. Desactivação concluída."),
+            "Ativa a habilidade. ATIVOS: sinônimos e sinônimas. Desativação concluída.",
+        )
+        self.assertEqual(
+            revisao.ptbr("activar, activados, activando; desactivadas, desactivou; actividades"),
+            "ativar, ativados, ativando; desativadas, desativou; atividades",
+        )
+
+    def test_controlo_nominal_preserva_verbo(self):
+        self.assertEqual(
+            revisao.ptbr("O controlo dos controlos está sob controlo. EU CONTROLO o exército."),
+            "O controle dos controles está sob controle. EU CONTROLO o exército.",
+        )
+        self.assertEqual(revisao.ptbr("Eu controlo e não controlo. Tu controlas."),
+                         "Eu controlo e não controlo. Tu controlas.")
+        self.assertEqual(revisao.ptbr("O CONTROLO e o Controlo; sem\ncontrolo"),
+                         "O CONTROLE e o Controle; sem\ncontrole")
+
+    def test_nao_remove_repeticao_ou_pronome_sem_contexto(self):
+        self.assertEqual(revisao.ptbr("Tu governas. Vi, vi a cidade. É muito muito longe."),
+                         "Tu governas. Vi, vi a cidade. É muito muito longe.")
+
     def test_gerundio(self):
         self.assertEqual(revisao.ptbr("Ele está a fazer e estão a ver. Está a mar alto."),
                          "Ele está fazendo e estão vendo. Está a mar alto.")

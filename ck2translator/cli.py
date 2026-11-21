@@ -28,6 +28,7 @@ from . import localisation, revisao
 from .config import BACKENDS, ConfigError, Mod, load_config, resolve_mods
 from .files import atomic_path, atomic_write
 from .profiles import get_profile, write_descriptors
+from .quality import quality_problems, unchanged_prose
 from . import __version__
 from .translator import (ArgosBackend, Backend, BackendError, Cache, EchoBackend, GoogleBackend, OllamaBackend,
                         OpenAICompatBackend, RateLimiter, Translator, TranslatorsBackend, fit_cp1252,
@@ -584,10 +585,17 @@ def cmd_diff(cfg: dict, mods: list[Mod], find: str | None) -> int:
                     continue
                 for column in tr["write_columns"]:
                     tb = localisation.cell(dst, b, column)
-                    if tb is None or localisation.cell(src, a, column) == tb:
+                    if tb is None:
                         continue
-                    warns = struct_warnings(ta, tb)
-                    if get_profile(cfg).id == "eu4":
+                    unchanged = localisation.cell(src, a, column) == tb
+                    warns = [] if unchanged else struct_warnings(ta, tb)
+                    if not unchanged or ta == tb:
+                        warns.extend(quality_problems(ta, tb))
+                    token_re = EU4_TOKEN_RE if get_profile(cfg).id == "eu4" else TOKEN_RE
+                    if unchanged_prose(ta, tb, keep=cfg.get("keep_terms", []),
+                                       glossary=cfg.get("glossary_terms", {}), token_re=token_re):
+                        warns.append("prosa em inglês ficou igual ao original; confira se faltou traduzir")
+                    if get_profile(cfg).id == "eu4" and not unchanged:
                         warns.extend(w for w in localisation.hard_problems(ta, tb, "eu4") if w not in warns)
                     hit = find and any(find.lower() in x.lower() for x in (a.key, ta, tb))
                     if not (hit if find else warns):

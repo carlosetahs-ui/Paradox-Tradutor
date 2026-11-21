@@ -17,8 +17,9 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ck2loc import EU4_TOKEN_RE, STRUCT_CHARS, TOKEN_RE
+from .ck2loc import EU4_TOKEN_RE, STRUCT_CHARS, TOKEN_RE, has_meaningful_text
 from .profiles import get_profile
+from .quality import quality_problems, unchanged_prose
 
 PROMPT_VERSION = "v1"          # mude se alterar o prompt: invalida o cache antigo
 PH_RE = re.compile(r"\{(\d+)\}")
@@ -62,7 +63,7 @@ def mask(text: str, extra_terms: list[str] | None = None,
         tokens.append(found)
         return "{%d}" % len(tokens)
 
-    if token_re is EU4_TOKEN_RE and term_regex is not None:
+    if term_regex is not None:
         # As letras em §Y e \\n não fazem parte do texto visível. Procurar os
         # termos somente entre códigos também impede casar dentro de $VAR$.
         parts = []
@@ -95,11 +96,52 @@ def placeholders_problem(out: str, n: int) -> str:
 
 
 _TYPO = {"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "\u2026": "...", "\u2013": "-", "\u2014": "-"}
+_TYPO.update({"«": '"', "»": '"', "‹": "'", "›": "'"})
 
 
 def normalize_punct(src: str, dst: str) -> str:
     """Troca aspas/travessões/reticências "tipográficos" por ASCII, SE o texto original não os usava."""
-    return "".join(_TYPO[c] if c in _TYPO and c not in src else c for c in dst)
+    replacements = _TYPO
+    if src.count("'") >= 2 and '"' not in src:
+        replacements = {**_TYPO, "«": "'", "»": "'"}
+    return "".join(replacements[c] if c in replacements and c not in src else c for c in dst)
+
+
+def restore_marker_spaces(source: str, translated: str) -> str:
+    """Recupera separadores perdidos junto a marcadores, sem separar cores de seu texto."""
+    edges = {m.group(0): (m.start() > 0 and source[m.start() - 1].isspace(),
+                           m.end() < len(source) and source[m.end()].isspace())
+             for m in PH_RE.finditer(source)}
+
+    def repair(match: re.Match) -> str:
+        before, after = edges.get(match.group(0), (False, False))
+        left = translated[match.start() - 1:match.start()] if match.start() else ""
+        right = translated[match.end():match.end() + 1]
+        return ((" " if before and left.isalnum() else "")
+                + match.group(0)
+                + (" " if after and (right.isalnum() or right == "{") else ""))
+    return PH_RE.sub(repair, translated)
+
+
+def color_markers_problem(source: str, translated: str, tokens: list[str]) -> str:
+    """Preserva a ordem e os trechos visíveis das cores, inclusive resets §W legados."""
+    colors = {str(i) for i, token in enumerate(tokens, 1)
+              if re.fullmatch(r"§[A-Za-z!]", token)}
+    original = [m for m in PH_RE.finditer(source) if m.group(1) in colors]
+    output = [m for m in PH_RE.finditer(translated) if m.group(1) in colors]
+    if [m.group(1) for m in original] != [m.group(1) for m in output]:
+        return "a ordem dos códigos de cor mudou"
+    for index, (start, restored) in enumerate(zip(original, output)):
+        if tokens[int(start.group(1)) - 1] == "§!":
+            continue
+        end = original[index + 1].start() if index + 1 < len(original) else len(source)
+        restored_end = output[index + 1].start() if index + 1 < len(output) else len(translated)
+        if source[start.end():end].strip() and not translated[restored.end():restored_end].strip():
+            return "o texto de um trecho colorido desapareceu"
+        if (has_meaningful_text(source[start.end():end])
+                and not has_meaningful_text(translated[restored.end():restored_end])):
+            return "o texto de um trecho colorido desapareceu; restaram somente marcadores"
+    return ""
 
 
 # --------------------------------------------------------------------------- encoding
@@ -472,9 +514,20 @@ class ArgosBackend(Backend):
                                    "Rode uma vez:  python ck2tr.py argos-setup")
             translate_fn = langs[source].get_translation(langs[target]).translate
         self.fn = translate_fn
+        self.lock = threading.Lock()
 
     def _tr(self, text: str) -> str:
-        return " ".join(self.fn(p) for p in split_text(text, 2000))
+        output = []
+        for part in split_text(text, 2000):
+            try:
+                with self.lock:
+                    translated = self.fn(part)
+            except Exception as error:
+                raise BackendError(f"Falha do Argos ao traduzir um trecho: {error}") from error
+            if not isinstance(translated, str) or not translated.strip():
+                raise BackendError("O Argos devolveu uma resposta vazia ou não textual.")
+            output.append(translated)
+        return " ".join(output)
 
     def _segmentwise(self, text: str) -> str:
         """Plano B: traduz só os trechos entre os marcadores {n}; os marcadores nunca passam pelo tradutor."""
@@ -491,8 +544,8 @@ class ArgosBackend(Backend):
         m = re.search(r"<texto>\n(.*?)\n</texto>", user, re.S)
         text = m.group(1) if m else user
         marked = PH_RE.sub(lambda x: f"XX{x.group(1)}XX", text)
-        out = re.sub(r"XX\s*(\d+)\s*XX", r"{\1}", self._tr(marked), flags=re.I)
-        if sorted(PH_RE.findall(out)) != sorted(PH_RE.findall(text)):
+        out = TranslatorsBackend._unmark(self._tr(marked))
+        if not TranslatorsBackend._ok(out, text):
             out = self._segmentwise(text)
         return out
 
@@ -519,6 +572,9 @@ class Cache:
                 path = str(file)
         self.db = sqlite3.connect(path, check_same_thread=False, uri=read_only)
         self.lock = threading.Lock()
+        # A mesma frase pode chegar de arquivos/workers diferentes ao mesmo tempo.
+        # O lock da consulta SQL não basta para evitar duas traduções concorrentes.
+        self.work_locks = [threading.Lock() for _ in range(64)]
         self.pending = 0
         self.closed = False
         if not read_only or path == ":memory:":
@@ -603,7 +659,7 @@ class Translator:
 
     # -- prompt ----------------------------------------------------------------
     def _hits(self, text: str) -> tuple[list[tuple[str, str]], list[str]]:
-        visible = self.token_re.split(text) if self.profile.id == "eu4" else [text]
+        visible = self.token_re.split(text)
 
         def matches(term: str) -> bool:
             pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", re.I)
@@ -646,7 +702,8 @@ class Translator:
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     # -- validação ---------------------------------------------------------------
-    def _validate(self, out: str, n_tokens: int, masked: str) -> str:
+    def _validate(self, out: str, n_tokens: int, masked: str,
+                  tokens: list[str] | None = None) -> str:
         if not out.strip():
             return "a resposta veio vazia"
         problem = placeholders_problem(out, n_tokens)
@@ -659,8 +716,26 @@ class Translator:
                     "Use apenas os marcadores {n} do original.")
         if FOREIGN_RE.search(out) and not FOREIGN_RE.search(masked):
             return "sua resposta anterior contém caracteres de outro idioma (chinês, russo...). Responda só em português do Brasil."
+        if any(PH_RE.sub("", out).count(char) != PH_RE.sub("", masked).count(char)
+               for char in "$§£"):
+            return "sua resposta anterior inventou ou alterou delimitadores de códigos do jogo"
         if len(out) > 4 * len(masked) + 40:
             return "a resposta ficou longa demais; devolva só a tradução"
+        for quote in ('"', "'"):
+            def count_quotes(text: str) -> int:
+                return (len(re.findall(r"(?<!\w)'|'(?!\w)", text)) if quote == "'"
+                        else text.count(quote))
+            if count_quotes(out) % 2 and not count_quotes(masked) % 2:
+                return "a tradução introduziu aspas desparelhadas"
+        if tokens is not None:
+            problem = color_markers_problem(masked, out, tokens)
+            if problem:
+                return problem
+        problems = quality_problems(masked, out)
+        if problems:
+            return "; ".join(problems)
+        if unchanged_prose(masked, out, keep=self.keep, glossary=self.glossary):
+            return "o texto em inglês foi devolvido sem tradução"
         return ""
 
     def reuse_ids(self) -> list[str]:
@@ -676,21 +751,26 @@ class Translator:
             m2, t2 = mask(core, *((kp, gl) if mid in NON_PROMPT_IDS else (None, None)),
                           token_re=self.token_re)
             hit = self.cache.get(self._key(m2, gl, kp, mid))
-            if hit is None or self._validate(hit, len(t2), m2):   # entrada antiga com defeito: ignora
+            if hit is None or self._validate(hit, len(t2), m2, t2):   # entrada antiga com defeito: ignora
                 continue
-            return unmask(self._post(self._punctuation(hit)), t2)
+            return self._render(m2, hit, t2)
         return None
 
-    def _post(self, masked_out: str) -> str:
+    def _post(self, masked_out: str, source: str, tokens: list[str]) -> str:
         if self.post is None:
             return masked_out
         edited = self.post(masked_out)
         # O cache guarda a resposta validada antes da revisão. Uma regra de
         # usuário inválida não pode apagar códigos nem inventar índices que
         # fariam unmask falhar; nesse caso conserva-se a tradução já segura.
-        if self._validate(edited, len(PH_RE.findall(masked_out)), masked_out):
+        if self._validate(edited, len(tokens), source, tokens):
             return masked_out
         return edited
+
+    def _render(self, source: str, output: str, tokens: list[str]) -> str:
+        output = normalize_punct(source, self._punctuation(output))
+        output = self._post(output, source, tokens)
+        return unmask(restore_marker_spaces(source, output), tokens)
 
     def _punctuation(self, text: str) -> str:
         return text.replace(";", ",") if self.profile.id == "ck2" else text
@@ -706,6 +786,16 @@ class Translator:
                               or self.token_re.search(core)):
             return Result("skip", src, "tem códigos do jogo (modo paranoid)")
         gl, kp = self._hits(core)
+        # Séries geradas de tecnologia: traduz o título uma vez e mantém o nível
+        # fora do modelo. Não se aplica a descrições nem a frases terminadas em número.
+        technology = re.fullmatch(r"((?:Administrative|Diplomatic|Military) Technology) ([IVXLCDM]+|[0-9]+)", core)
+        base_hits = self._hits(technology.group(1)) if technology else ([], [])
+        if technology and (gl, kp) == base_hits:
+            title = self.translate(technology.group(1), dry=dry)
+            if title.status in ("ok", "cache"):
+                return Result(title.status, lead + title.text + " " + technology.group(2) + trail,
+                              "padrão de tecnologia numerada")
+            return Result(title.status, src, title.note)
         # Backend sem prompt (translators, Google, Argos): "manter" e glossário viram marcadores, como os
         # códigos do jogo (o glossário entra com a tradução já pronta). Backend com prompt (Ollama): vão no prompt.
         masked, tokens = mask(core, *((None, None) if self.backend.uses_prompt else (kp, gl)),
@@ -715,24 +805,29 @@ class Translator:
                 return Result("ok", lead + unmask(masked, tokens) + trail, "só glossário")
             return Result("skip", src, "sem texto traduzível")
         key = self._key(masked, gl, kp)
+        with self.cache.work_locks[int(key[:8], 16) % len(self.cache.work_locks)]:
+            return self._translate_masked(core, lead, trail, masked, tokens, gl, kp, key, dry)
+
+    def _translate_masked(self, core, lead, trail, masked, tokens, gl, kp, key, dry) -> Result:
         cached = self.cache.get(key)
-        if cached is not None and not self._validate(cached, len(tokens), masked):
-            return Result("cache", lead + unmask(self._post(self._punctuation(cached)), tokens) + trail)
+        if cached is not None and not self._validate(cached, len(tokens), masked, tokens):
+            return Result("cache", lead + self._render(masked, cached, tokens) + trail)
         other = self._reuse(core, gl, kp)
         if other is not None:
             self.reused += 1
             return Result("cache", lead + other + trail)
 
         if dry:
-            return Result("pendente", src)
+            return Result("pendente", lead + core + trail)
         system, feedback, problem = self._system(gl, kp), "", ""
         attempts = self.max_attempts if self.backend.uses_prompt else 2
         for _ in range(attempts):
             out = clean_output(self.backend.chat(system, self._user(masked, feedback)), core)
-            problem = self._validate(out, len(tokens), masked)
+            out = normalize_punct(masked, out)
+            problem = self._validate(out, len(tokens), masked, tokens)
             if not problem:
                 out = self._punctuation(out)
                 self.cache.put(key, core, out, self.backend.model_id)
-                return Result("ok", lead + unmask(self._post(out), tokens) + trail)
+                return Result("ok", lead + self._render(masked, out, tokens) + trail)
             feedback = problem
-        return Result("falha", src, problem)
+        return Result("falha", lead + core + trail, problem)

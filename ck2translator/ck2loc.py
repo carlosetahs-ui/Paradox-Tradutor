@@ -17,14 +17,14 @@ DEFAULT_COLUMNS = {"english": 1, "french": 2, "german": 3, "spanish": 5}
 TOKEN_RE = re.compile(
     r"\$[^$\s;]+\$"                  # $VARIAVEL$
     r"|\[[^\[\];]+\]"                # [Root.GetName]  [This.Custom('x')]
-    r"|§[A-Za-z!]"              # §Y  §!   (cores)
+    r"|§[A-Za-z!]|§"            # §Y  §! e § isolado legado (não enviar ao modelo)
     r"|£[^£\s;]+£"    # £gold£   (ícones)
     r"|\\[nt]"                       # \n  \t  literais
     r"|\{[^{}]*\}"                   # {qualquer coisa} usada por alguns mods
 )
 
 # O EU4 também usa bandeiras @TAG / @[Root.GetTag] e escapes de aspas e
-# barras. O padrão CK2 fica intacto para preservar o cache e os CSV legados.
+# barras. Os tokens CK2 são compartilhados, preservando as chaves de códigos legados bem formados.
 EU4_TOKEN_RE = re.compile(
     TOKEN_RE.pattern
     + r"|@(?:[A-Z0-9]{3}(?![A-Za-z0-9_])|\[[^\[\]\r\n]+\])"
@@ -35,6 +35,31 @@ EU4_TOKEN_RE = re.compile(
 STRUCT_CHARS = "[]$\u00a7\u00a3{}\\"
 
 
+def has_meaningful_text(text: str, token_re: re.Pattern[str] = TOKEN_RE) -> bool:
+    """Ignora códigos e artigos ingleses que podem ser omitidos antes de nomes."""
+    words = re.findall(r"[^\W\d_]+", token_re.sub(" ", text))
+    return any(word.casefold() not in {"a", "an", "the"} for word in words)
+
+
+def color_problems(src: str, dst: str, token_re: re.Pattern[str] = TOKEN_RE) -> list[str]:
+    """Compara a sequência de cores sem exigir §! em fontes que usam reset §W."""
+    original = list(re.finditer(r"§[A-Za-z!]", src))
+    translated = list(re.finditer(r"§[A-Za-z!]", dst))
+    if [m.group() for m in original] != [m.group() for m in translated]:
+        return ["ordem dos códigos de cor mudou"]
+    for index, (start, restored) in enumerate(zip(original, translated)):
+        if start.group() == "§!":
+            continue
+        end = original[index + 1].start() if index + 1 < len(original) else len(src)
+        restored_end = translated[index + 1].start() if index + 1 < len(translated) else len(dst)
+        source_range, output_range = src[start.end():end], dst[restored.end():restored_end]
+        if source_range.strip() and not output_range.strip():
+            return ["texto de um trecho colorido desapareceu"]
+        if has_meaningful_text(source_range, token_re) and not has_meaningful_text(output_range, token_re):
+            return ["texto de um trecho colorido desapareceu; restaram somente códigos"]
+    return []
+
+
 def hard_problems(src: str, dst: str) -> list[str]:
     """Diferenças que NUNCA são aceitáveis entre o texto original e o traduzido (lista vazia = seguro)."""
     p: list[str] = []
@@ -43,6 +68,7 @@ def hard_problems(src: str, dst: str) -> list[str]:
             p.append(f"quantidade de '{ch}' mudou ({src.count(ch)} -> {dst.count(ch)})")
     if sorted(TOKEN_RE.findall(src)) != sorted(TOKEN_RE.findall(dst)):
         p.append("códigos do jogo diferentes")
+    p.extend(color_problems(src, dst))
     if (src[:len(src) - len(src.lstrip())] != dst[:len(dst) - len(dst.lstrip())]
             or src[len(src.rstrip()):] != dst[len(dst.rstrip()):]):
         p.append("espaços no início/fim mudaram")
