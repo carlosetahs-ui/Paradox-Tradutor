@@ -49,9 +49,16 @@ def loc_files(mod: Mod, cfg: dict) -> list[Path]:
 
 def _read_loc(path: Path, cfg: dict):
     try:
-        return localisation.read(path, get_profile(cfg).id)
+        game = get_profile(cfg).id
+        loc = localisation.read(path, game, ignore_invalid=True)
     except (ValueError, UnicodeError) as error:
         raise ConfigError(f"Localisation inválida em {path}: {error}") from error
+    if game == "eu4":
+        for number, line in enumerate(loc.lines, 1):
+            if line.invalid_reason:
+                print(f"AVISO: Localisation inválida em {path}: linha {number} ignorada na tradução "
+                      f"e preservada sem alterações: {line.invalid_reason}", file=sys.stderr)
+    return loc
 
 
 def build_backend(cfg: dict, override: str | None, *, offline: bool = False):

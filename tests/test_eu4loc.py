@@ -26,10 +26,10 @@ class Eu4LocTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
-    def read(self, text=SAMPLE, *, bom=True, name="a_l_english.yml"):
+    def read(self, text=SAMPLE, *, bom=True, name="a_l_english.yml", ignore_invalid=False):
         path = self.root / name
         path.write_bytes((BOM if bom else b"") + text.encode("utf-8"))
-        return LocFile.read(path)
+        return LocFile.read(path, ignore_invalid=ignore_invalid)
 
     def test_bom_roundtrip_is_byte_identical(self):
         loc = self.read()
@@ -103,6 +103,33 @@ class Eu4LocTests(unittest.TestCase):
             with self.subTest(sample=sample):
                 with self.assertRaisesRegex(ValueError, r"a_l_english.yml: linha \d+"):
                     self.read(sample)
+
+    def test_tolerant_read_preserves_invalid_lines_and_resumes_after_them(self):
+        sample = (
+            ' orphan:0 "Before header"\r\n'
+            'l_english:\n'
+            ' before:0 "Hello"\r\n'
+            ' broken:0 "unfinished\n'
+            ' unquoted:0 invalid\r\n'
+            ' after:0 "Welcome home"\n'
+            'l_french:\r\n'
+            ' other:0 "Bonjour"\n'
+            ' trailing:0 "Hello" invalid'
+        )
+        loc = self.read(sample, ignore_invalid=True)
+        self.assertEqual(loc.to_bytes(), BOM + sample.encode("utf-8"))
+        self.assertEqual([number for number, line in enumerate(loc.lines, 1) if line.invalid_reason],
+                         [1, 4, 5, 9])
+        self.assertEqual([(line.language, line.key) for line in loc.entries()],
+                         [("english", "before"), ("english", "after"), ("french", "other")])
+        loc.set_value(loc.lines[5], "Bem-vindo ao lar")
+        self.assertEqual(loc.to_bytes(), BOM + sample.replace("Welcome home", "Bem-vindo ao lar").encode("utf-8"))
+        original = self.read(sample, name="original.yml", ignore_invalid=True)
+        loc.write(self.root / "out.yml")
+        translated = LocFile.read(self.root / "out.yml", ignore_invalid=True)
+        self.assertEqual(compare(original, translated, {"english"}, "english"), [])
+        translated.lines[3].raw += " altered"
+        self.assertTrue(compare(original, translated, {"english"}, "english"))
 
     def test_literal_escape_and_flag_protection(self):
         src = 'Hello @FRA $DEV|Y$ [Root.GetName] §Y£adm£§!\\n\\t\\"\\\\'

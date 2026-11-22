@@ -107,6 +107,9 @@ Os `.yml` do EU4 são lidos também em subpastas. A saída é sempre **UTF-8 com
 o original não tenha BOM. Apenas o texto das entradas do idioma de origem é traduzido; chaves,
 números de versão, espaços de formatação, comentários, escapes e códigos são preservados.
 O cabeçalho nativo, por exemplo `l_english:`, e o nome original do arquivo são mantidos.
+Linhas inválidas (por exemplo, sem aspas finais) são ignoradas na tradução e preservadas
+sem alterações na saída. O programa avisa o arquivo, a linha e o motivo, e continua
+traduzindo as entradas válidas. Isso é automático, sem opção adicional na configuração.
 Use `source_column` e `write_columns` com o **mesmo idioma**; para PT-BR, o padrão é
 `english` / `["english"]`, e você deve selecionar **inglês** no EU4. Não use `l_portuguese`.
 

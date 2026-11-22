@@ -28,6 +28,7 @@ class Line:
     prefix: str = ""
     suffix: str = ""
     dirty: bool = False
+    invalid_reason: str | None = None
 
     @property
     def is_entry(self) -> bool:
@@ -59,8 +60,8 @@ def _parse_entry(raw: str, eol: str, language: str | None) -> Line:
     raise ValueError("entrada inválida: aspas finais ausentes ou conteúdo após o valor")
 
 
-def split_lines(text: str) -> list[Line]:
-    """Separa somente em LF/CRLF, preservando a última linha sem quebra."""
+def split_lines(text: str, *, ignore_invalid: bool = False) -> list[Line]:
+    """Preserva LF/CRLF e, no modo tolerante, linhas inválidas sem traduzi-las."""
     parts = text.split("\n")
     lines: list[Line] = []
     language = None
@@ -85,7 +86,9 @@ def split_lines(text: str) -> list[Line]:
             if language is None:
                 raise ValueError("entrada antes do cabeçalho l_<idioma>:")
         except ValueError as error:
-            raise ValueError(f"linha {index + 1}: {error}") from error
+            if not ignore_invalid:
+                raise ValueError(f"linha {index + 1}: {error}") from error
+            line = Line(part, eol, language, invalid_reason=str(error))
         lines.append(line)
     return lines
 
@@ -114,13 +117,13 @@ class LocFile:
     lines: list[Line]
 
     @classmethod
-    def read(cls, path: str | Path) -> "LocFile":
+    def read(cls, path: str | Path, *, ignore_invalid: bool = False) -> "LocFile":
         path = Path(path)
         data = path.read_bytes()
         # Uma fonte UTF-8 sem BOM é aceita, mas nunca se tenta CP1252 para EU4.
         text = data.decode("utf-8-sig")
         try:
-            lines = split_lines(text)
+            lines = split_lines(text, ignore_invalid=ignore_invalid)
         except ValueError as error:
             raise ValueError(f"{path}: {error}") from error
         encoding = "utf-8-sig" if data.startswith(b"\xef\xbb\xbf") else "utf-8"
@@ -167,7 +170,7 @@ def compare(src: LocFile, dst: LocFile, target_languages: set[str],
             continue
         if not original.is_entry:
             if original.text() != translated.text():
-                problems.append(f"{label}: cabeçalho/comentário/linha vazia alterado")
+                problems.append(f"{label}: cabeçalho/comentário/linha vazia/linha inválida alterado")
             continue
         if (original.key, original.language, original.prefix, original.suffix) != (
                 translated.key, translated.language, translated.prefix, translated.suffix):

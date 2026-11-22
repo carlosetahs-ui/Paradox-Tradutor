@@ -264,22 +264,59 @@ class Eu4PipelineTests(unittest.TestCase):
         self.assertIn("descriptor.mod", message)
         self.assertFalse((self.out / "meu_eu4_ptbr.zip").exists())
 
-    def test_invalid_source_has_actionable_error_without_traceback(self):
-        for invalid in (BOM + b'l_english:\n broken:0 "unfinished',
-                        BOM + b'l_english:\n broken:0 "caf\xe9"'):
-            with self.subTest(invalid=invalid):
-                self.core.write_bytes(invalid)
-                for command in ("scan", "status", "terms", "translate"):
-                    code, message = self.run_cli(command)
-                    self.assertEqual(code, 2, message)
-                    self.assertIn("Localisation inválida", message)
-                    self.assertIn(self.core.name, message)
-                    self.assertNotIn("Traceback", message)
+    def test_malformed_source_lines_are_skipped_and_preserved_in_overlay(self):
+        original = BOM + (
+            'l_english:\r\n'
+            ' before:0 "Welcome home"\n'
+            ' broken:0 "unfinished\r\n'
+            ' after:0 "Peace returns"\n'
+            ' unquoted:0 invalid\n'
+            ' final:0 "See you soon"'
+        ).encode("utf-8")
+        self.core.write_bytes(original)
+        for command in ("scan", "status", "terms", "translate"):
+            with self.subTest(command=command):
+                code, message = self.run_cli(command)
+                self.assertEqual(code, 0, message)
+                self.assertIn("AVISO: Localisation inválida", message)
+                self.assertIn(self.core.name, message)
+                self.assertIn("linha 3 ignorada", message)
+                self.assertIn("linha 5 ignorada", message)
+                self.assertNotIn("Traceback", message)
+        expected = original
+        for value in (b"Welcome home", b"Peace returns", b"See you soon"):
+            expected = expected.replace(value, b"PT> " + value)
+        self.assertEqual(self.core.read_bytes(), original)
+        self.assertEqual(self.translated().read_bytes(), expected)
+        self.translate()  # A retomada pelo cache também preserva as linhas inválidas.
+        self.assertEqual(self.translated().read_bytes(), expected)
+        for command in ("verify", "package", "diff"):
+            code, message = self.run_cli(command)
+            self.assertEqual(code, 0, message)
+        with zipfile.ZipFile(self.out / "meu_eu4_ptbr.zip") as archive:
+            self.assertEqual(archive.read("meu_eu4_ptbr/localisation/00_core_l_english.yml"), expected)
+        self.translated().write_bytes(expected.replace(b'broken:0 "unfinished', b'broken:0 "altered'))
+        for command in ("verify", "package"):
+            code, message = self.run_cli(command)
+            self.assertEqual(code, 1, message)
+            self.assertIn("linha inválida alterado", message)
+
+    def test_invalid_utf8_source_has_actionable_error_without_traceback(self):
+        self.core.write_bytes(BOM + b'l_english:\n broken:0 "caf\xe9"')
+        for command in ("scan", "status", "terms", "translate"):
+            with self.subTest(command=command):
+                code, message = self.run_cli(command)
+                self.assertEqual(code, 2, message)
+                self.assertIn("Localisation inválida", message)
+                self.assertIn(self.core.name, message)
+                self.assertNotIn("Traceback", message)
 
     def test_corrupted_output_reports_failure_without_traceback(self):
         self.translate()
+        clean = self.translated().read_bytes()
         for invalid in (BOM + b'l_english:\n broken:0 "unfinished',
-                        BOM + b'l_english:\n broken:0 "caf\xe9"'):
+                        BOM + b'l_english:\n broken:0 "caf\xe9"',
+                        clean.replace(b'"PT> Welcome to Anbennar." # keep comment', b'"unfinished')):
             with self.subTest(invalid=invalid):
                 self.translated().write_bytes(invalid)
                 for command in ("verify", "package"):
