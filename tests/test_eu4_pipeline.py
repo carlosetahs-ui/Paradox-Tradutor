@@ -9,7 +9,7 @@ from unittest import mock
 
 from ck2translator import cli
 from ck2translator.eu4loc import LocFile
-from ck2translator.translator import EchoBackend
+from ck2translator.translator import ArgosBackend, EchoBackend
 
 
 BOM = b"\xef\xbb\xbf"
@@ -162,21 +162,43 @@ class Eu4PipelineTests(unittest.TestCase):
         self.assertFalse((self.root / "cache.sqlite").exists())
         self.assertFalse(self.out.exists())
 
-    def test_cached_status_and_rerun_reuse_translation_without_writes_to_cache(self):
-        self.translate()
+    def test_cached_status_and_rerun_work_without_argos_installed(self):
+        self.configure("workers = 4", model="backend = 'argos'")
+        translate_text = mock.Mock(side_effect=lambda text: "PT> " + text)
+        backend = ArgosBackend(translate_fn=translate_text)
+        with mock.patch.object(cli, "ArgosBackend", return_value=backend) as start_backend:
+            self.translate()
+        start_backend.assert_called_once()
+        self.assertEqual(translate_text.call_count, 6)
+
         cache = self.root / "cache.sqlite"
         before = cache.read_bytes()
-        code, message = self.run_cli("status")
+        output = self.translated()
+        expected = output.read_bytes()
+        output.unlink()
+        with mock.patch.dict("sys.modules", {"argostranslate": None, "argostranslate.translate": None}):
+            code, message = self.run_cli("status")
+            self.translate()
         self.assertEqual(code, 0, message)
         self.assertIn("faltam 0", message)
         self.assertEqual(cache.read_bytes(), before)
-        backend = EchoBackend()
-        with mock.patch.object(backend, "chat", wraps=backend.chat) as chat, \
-                mock.patch.object(cli, "build_backend", return_value=backend):
-            self.translate()
-        # The legacy preflight ping remains; every game text comes from cache.
-        self.assertEqual(chat.call_count, 1)
-        self.assertIn("ping", chat.call_args.args[1])
+        self.assertEqual(output.read_bytes(), expected)
+
+    def test_ollama_only_receives_uncached_text(self):
+        self.configure(model="backend = 'ollama'\nname = 'test'")
+        self.core.write_text('l_english:\n first:0 "Welcome home"\n second:0 "Declare war"\n',
+                             encoding="utf-8-sig")
+        with mock.patch("ck2translator.translator._post_json", return_value={"message": {"content": "Bem-vindo."}}):
+            self.translate("--limit", "1")
+        with mock.patch("ck2translator.translator._post_json", return_value={
+            "message": {"content": "Declarar guerra"}
+        }) as request:
+            self.translate("--limit", "2")
+        request.assert_called_once()
+        payload = request.call_args.args[1]
+        self.assertIn("Declare war", payload["messages"][-1]["content"])
+        entries = {line.key: line.value for line in LocFile.read(self.translated()).entries()}
+        self.assertEqual(entries, {"first": "Bem-vindo.", "second": "Declarar guerra"})
 
     def test_diff_finds_translations_and_warns_about_eu4_flags(self):
         self.translate()

@@ -114,8 +114,8 @@ jogo) e **a tradução do glossário é colocada no lugar depois** — é imposi
 Cuidado: por isso um erro no glossário se repete em todas as linhas; revise antes de ativar.
 Os arquivos fornecidos são voltados a Game of Thrones. O exemplo EU4 os desativa: crie seus próprios
 arquivos ou use `[keep]` e `[glossary]` na configuração EU4.
-Para Elder Scrolls Universalis, há um exemplo completo em
-[`examples/config.eu4.esu.toml`](../examples/config.eu4.esu.toml), com termos como
+Para Elder Scrolls Universalis, use o [exemplo de configuração do EU4](../examples/config.eu4.toml)
+como ponto de partida e adicione termos como
 `Harvester = Colhedor`, `Mages Guild = Guilda dos Magos`, `High King = Alto Rei` e
 `Sacred Lake = Lago Sagrado`, além de Dunmer e nomes de deuses preservados.
 São escolhas editoriais específicas do mod e podem ser ajustadas na configuração.

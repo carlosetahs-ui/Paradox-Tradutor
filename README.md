@@ -152,6 +152,8 @@ Novas saídas guardam `translation_manifest.json` com os arquivos gerados: se um
 a verificação acusa a ausência e o pacote é recusado. Traduções antigas sem esse arquivo continuam aceitas.
 
 O cache permite retomar uma execução interrompida. O programa valida traduções armazenadas antes de usá-las.
+Se todos os textos selecionados estiverem resolvidos pelo cache, pelo glossário ou pelas regras de exclusão,
+`translate` reconstrói a saída sem iniciar o backend de tradução.
 Se uma linha não passar nas proteções, mantém o original e registra o motivo em
 `saida/<mod>_relatorio.csv`. Uma nova execução atualiza esse relatório.
 Reexecutar a tradução reconstrói os arquivos processados a partir do original; `--limit` limita os textos

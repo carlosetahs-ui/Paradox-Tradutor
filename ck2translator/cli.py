@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import time
 import zipfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 from threading import Lock
@@ -267,11 +268,32 @@ def write_mod_descriptor(out_root: Path, mod: Mod) -> None:
     write_descriptors(out_root, mod)
 
 
-NO_PING = ("translators", "google")      # backends online: o pré-teste gastaria um pedido à toa
+class _LazyBackend(Backend):
+    """Usa os metadados do backend até a primeira tradução que precisar dele."""
+
+    def __init__(self, metadata: Backend, factory: Callable[[], Backend]):
+        self.model_id = metadata.model_id
+        self.uses_prompt = metadata.uses_prompt
+        self._factory = factory
+        self._backend: Backend | None = None
+        self._lock = Lock()
+
+    def chat(self, system: str, user: str) -> str:
+        with self._lock:
+            if self._backend is None:
+                self._backend = self._factory()
+            backend = self._backend
+        return backend.chat(system, user)
+
+    @property
+    def stats(self):
+        return getattr(self._backend, "stats", None)
 
 
 def make_translator(cfg: dict, backend_override: str | None, *, offline: bool = False):
-    backend = build_backend(cfg, backend_override, offline=offline)
+    backend = build_backend(cfg, backend_override, offline=True)
+    if not offline:
+        backend = _LazyBackend(backend, lambda: build_backend(cfg, backend_override))
     cache = Cache(str(cfg["translate"]["cache"]), read_only=offline)
     name = cfg["model"].get("name", "")
     rc = cfg["translate"]["reuse_cache_from"]
@@ -299,8 +321,6 @@ def cmd_translate(cfg: dict, mods: list[Mod], backend_override: str | None, limi
         if cfg["replacements"] or cfg["translate"]["ptbr_fix"]:
             print(f"Pós-edição: ptbr_fix={'sim' if cfg['translate']['ptbr_fix'] else 'não'}, "
                   f"{len(cfg['replacements'])} substituições suas")
-        if backend.model_id.split(":")[0] not in NO_PING:
-            backend.chat("Responda apenas: OK", "<texto>\nping\n</texto>")      # pré-teste
         ids = translator.reuse_ids()
         if ids:
             print(f"Reaproveitando o que já foi traduzido por: {', '.join(ids)}")
