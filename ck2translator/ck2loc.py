@@ -164,7 +164,11 @@ class LocFile:
     @classmethod
     def read(cls, path: str | Path) -> "LocFile":
         path = Path(path)
-        text, enc = decode_bytes(path.read_bytes())
+        return cls.from_bytes(path, path.read_bytes())
+
+    @classmethod
+    def from_bytes(cls, path: Path, data: bytes) -> "LocFile":
+        text, enc = decode_bytes(data)
         lines = split_lines(text)
         return cls(path, enc, lines, detect_columns(lines))
 

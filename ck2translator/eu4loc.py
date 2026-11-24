@@ -119,7 +119,10 @@ class LocFile:
     @classmethod
     def read(cls, path: str | Path, *, ignore_invalid: bool = False) -> "LocFile":
         path = Path(path)
-        data = path.read_bytes()
+        return cls.from_bytes(path, path.read_bytes(), ignore_invalid=ignore_invalid)
+
+    @classmethod
+    def from_bytes(cls, path: Path, data: bytes, *, ignore_invalid: bool = False) -> "LocFile":
         # Uma fonte UTF-8 sem BOM é aceita, mas nunca se tenta CP1252 para EU4.
         text = data.decode("utf-8-sig")
         try:

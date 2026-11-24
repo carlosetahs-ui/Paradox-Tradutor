@@ -12,6 +12,7 @@ import argparse
 import collections
 import csv
 import fnmatch
+import hashlib
 import json
 import re
 import shutil
@@ -20,9 +21,10 @@ import sys
 import time
 import zipfile
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from itertools import islice
 from pathlib import Path, PurePosixPath
-from threading import Lock
+from threading import Event, Lock
 
 from .ck2loc import EU4_TOKEN_RE, TOKEN_RE
 from . import localisation, revisao
@@ -31,9 +33,9 @@ from .files import atomic_path, atomic_write
 from .profiles import get_profile, write_descriptors
 from .quality import quality_problems, unchanged_prose
 from . import __version__
-from .translator import (ArgosBackend, Backend, BackendError, Cache, EchoBackend, GoogleBackend, OllamaBackend,
-                        OpenAICompatBackend, RateLimiter, Translator, TranslatorsBackend, fit_cp1252,
-                        install_argos_package, mask, normalize_punct)
+from .translator import (PROMPT_VERSION, ArgosBackend, Backend, BackendError, Cache, EchoBackend, GoogleBackend, OllamaBackend,
+                        OpenAICompatBackend, RateLimiter, Result, TextBackendError, Translator, TranslatorsBackend,
+                        fit_cp1252, install_argos_package, mask, normalize_punct, translation_cancel)
 
 
 # --------------------------------------------------------------------------- configuração
@@ -48,10 +50,10 @@ def loc_files(mod: Mod, cfg: dict) -> list[Path]:
                               for pat in skip))
 
 
-def _read_loc(path: Path, cfg: dict):
+def _read_loc(path: Path, cfg: dict, *, data: bytes | None = None):
     try:
         game = get_profile(cfg).id
-        loc = localisation.read(path, game, ignore_invalid=True)
+        loc = localisation.read(path, game, ignore_invalid=True, data=data)
     except (ValueError, UnicodeError) as error:
         raise ConfigError(f"Localisation inválida em {path}: {error}") from error
     if game == "eu4":
@@ -90,11 +92,13 @@ def build_backend(cfg: dict, override: str | None, *, offline: bool = False):
         return TranslatorsBackend(m.get("providers", ["google", "bing", "alibaba", "yandex"]),
                                   m.get("source_lang", "en"), m.get("target_lang", "pt"), limiter,
                                   int(m.get("max_retries", 4)), float(m.get("backoff_base", 15)),
-                                  float(m.get("cooldown", 600)), int(m.get("max_chars", 3000)))
+                                  float(m.get("cooldown", 600)), int(m.get("max_chars", 3000)),
+                                  timeout=float(m.get("timeout", 30)))
     if kind == "google":
         return GoogleBackend(m.get("source_lang", "en"), m.get("target_lang", "pt"),
                              (float(m.get("pause_min", 1.0)), float(m.get("pause_max", 2.0))),
-                             int(m.get("long_pause_every", 100)), float(m.get("long_pause", 30)))
+                             int(m.get("long_pause_every", 100)), float(m.get("long_pause", 30)),
+                             timeout=float(m.get("timeout", 30)))
     if kind == "argos":
         return ArgosBackend(m.get("source_lang", "en"), m.get("target_lang", "pt"))
     name = m.get("name")
@@ -153,100 +157,132 @@ def _fmt_time(sec: float) -> str:
 def _progress(done: int, total: int, counts: dict[str, int], t_model: float | None, calls: int) -> None:
     eta = ""
     if t_model is not None and calls >= 3:
-        per = (time.time() - t_model) / calls            # segundos por texto que realmente foi ao modelo
+        per = (time.monotonic() - t_model) / calls
         eta = f" | {per:.1f}s/texto, faltam até ~{_fmt_time(per * (total - done))}"
     sys.stdout.write(f"\r  traduzindo {done}/{total}  ok={counts['ok']} cache={counts['cache']} "
                      f"pulados={counts['skip']} falhas={counts['falha']}{eta}      ")
     sys.stdout.flush()
 
 
+_MAX_CONSECUTIVE_BACKEND_FAILURES = 5
+
+
+def _translate_batch(translator: Translator, todo: list[str], workers: int, *, consecutive: int = 0):
+    stop = Event()
+    texts = iter(todo)
+    results = {}
+    counts = {"ok": 0, "cache": 0, "skip": 0, "falha": 0}
+    errors = 0
+    t_model, last_print = None, 0.0
+
+    def translate(text: str) -> Result:
+        token = translation_cancel.set(stop)
+        try:
+            return translator.translate(text)
+        finally:
+            translation_cancel.reset(token)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = {pool.submit(translate, text): text for text in islice(texts, workers)}
+        try:
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    text = pending.pop(future)
+                    try:
+                        result = future.result()
+                    except TextBackendError as error:
+                        errors += 1
+                        consecutive += 1
+                        result = Result("falha", text, str(error))
+                    else:
+                        if result.status in ("ok", "falha"):
+                            consecutive = 0
+                    results[text] = result
+                    counts[result.status] += 1
+                if t_model is None and (counts["ok"] or counts["falha"]):
+                    t_model = time.monotonic()
+                now = time.monotonic()
+                if len(results) == len(todo) or now - last_print >= 2:
+                    _progress(len(results), len(todo), counts, t_model, counts["ok"] + counts["falha"])
+                    last_print = now
+                if consecutive >= _MAX_CONSECUTIVE_BACKEND_FAILURES:
+                    break
+                for text in islice(texts, len(done)):
+                    pending[pool.submit(translate, text)] = text
+        finally:
+            stop.set()
+            for future in pending:
+                future.cancel()
+    return results, counts, errors, consecutive
+
+
 def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None) -> int:
     tr = cfg["translate"]
     out_root: Path = tr["output_dir"]
-    src_name, write_names = tr["source_column"], tr["write_columns"]
-    game = get_profile(cfg).id
+    if tr["mode"] == "overlay":
+        return _translate_overlay(mod, cfg, translator, limit)
 
-    if tr["mode"] == "inplace":
-        backup = out_root / "backup" / mod.slug
-        if backup.exists():
-            sys.exit(f"Já existe backup em {backup}. Este mod provavelmente já foi traduzido "
-                     "in-place; traduzir de novo traduziria o português. Restaure o backup ou use overlay.")
-
+    backup = out_root / "backup" / mod.slug
+    if backup.exists():
+        sys.exit(f"Já existe backup em {backup}. Este mod provavelmente já foi traduzido "
+                 "in-place; traduzir de novo traduziria o português. Restaure o backup ou use overlay.")
     locs = [_read_loc(p, cfg) for p in loc_files(mod, cfg)]
-    texts: dict[str, None] = {}
-    for loc in locs:
-        for _, text in localisation.source_entries(loc, src_name):
-            texts.setdefault(text, None)
+    texts = dict.fromkeys(text for loc in locs for _, text in localisation.source_entries(loc, tr["source_column"]))
     todo = list(texts)[:limit] if limit is not None else list(texts)
     print(f"\n== {mod.name}: {len(locs)} arquivos, {len(todo)} textos únicos para traduzir")
 
-    results, counts = {}, {"ok": 0, "cache": 0, "skip": 0, "falha": 0}
-    lock = Lock()
-    t_model, last_print = None, 0.0
-    with ThreadPoolExecutor(max_workers=int(tr["workers"])) as ex:
-        futures = {ex.submit(translator.translate, t): t for t in todo}
-        try:
-            for i, fut in enumerate(as_completed(futures), 1):
-                res = fut.result()                      # BackendError sobe daqui
-                with lock:
-                    results[futures[fut]] = res
-                    counts[res.status] += 1
-                if t_model is None and res.status in ("ok", "falha"):
-                    t_model = time.time()          # o relógio só começa no 1º texto que foi ao modelo
-                now = time.time()
-                if i == len(todo) or now - last_print >= 2:
-                    _progress(i, len(todo), counts, t_model, counts["ok"] + counts["falha"])
-                    last_print = now
-        except BaseException:
-            ex.shutdown(wait=False, cancel_futures=True)
-            raise
+    results, counts, errors, _ = _translate_batch(translator, todo, tr["workers"])
     print()
+    deferred = len(todo) - len(results)
+    if deferred:
+        print(f"  O backend falhou repetidamente. {deferred} texto(s) ficaram para a próxima execução.")
+    if errors:
+        print("  O mod original foi preservado. Rode novamente para retomar pelo cache.")
 
-    # aplica os resultados e grava
     report: list[list[str]] = []
-    written = reverted = 0
     for loc in locs:
-        changed = 0
         relative = loc.path.relative_to(mod.loc_dir)
-        for ln, source in localisation.source_entries(loc, src_name):
-            res = results.get(source)
-            if res is None or res.status == "skip":
-                continue
-            if res.status == "falha":
-                report.append([relative.as_posix(), ln.key, "falha", source, res.note])
-                continue
-            new = fit_cp1252(res.text) if not loc.encoding.startswith("utf-8") else res.text
-            if tr["safety"] != "normal" or game == "eu4":
-                new = normalize_punct(source, new)
-                bad = localisation.hard_problems(source, new, game)
-                if bad:
-                    report.append([relative.as_posix(), ln.key, "revertida", source, "; ".join(bad)])
-                    reverted += 1
-                    continue
-            try:
-                localisation.set_translation(loc, ln, write_names, new)
-            except ValueError as error:
-                report.append([relative.as_posix(), ln.key, "revertida", source, str(error)])
-                reverted += 1
-                continue
-            changed += 1
-        overlay = out_root / f"{mod.slug}_ptbr" / "localisation" / relative
-        if not changed and not (tr["mode"] == "overlay" and overlay.exists()):
-            continue
-        if tr["mode"] == "overlay":
-            dest = overlay
-        else:
-            backup_file = out_root / "backup" / mod.slug / "localisation" / relative
+        changed = _apply_translations(loc, relative.as_posix(), cfg, results, report)
+        if changed and not errors:
+            backup_file = backup / "localisation" / relative
             backup_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(loc.path, backup_file)
-            dest = loc.path
-        loc.write(dest)
-        written += 1
-        print(f"  gravado: {dest}  ({changed} linhas)")
+            loc.write(loc.path)
+            print(f"  gravado: {loc.path}  ({changed} linhas)")
+    _write_report(out_root, mod, report)
+    print(f"  resumo: {counts}")
+    return len(report)
 
-    if tr["mode"] == "overlay" and written:
-        write_descriptors(out_root, mod, cfg)
-        _write_manifest(cfg, mod)
+
+def _apply_translations(loc, name: str, cfg: dict, results: dict[str, Result], report: list[list[str]]) -> int:
+    tr = cfg["translate"]
+    game = get_profile(cfg).id
+    changed = 0
+    for line, source in localisation.source_entries(loc, tr["source_column"]):
+        res = results.get(source)
+        if res is None or res.status == "skip":
+            continue
+        if res.status == "falha":
+            report.append([name, line.key, "falha", source, res.note])
+            continue
+        new = fit_cp1252(res.text) if not loc.encoding.startswith("utf-8") else res.text
+        if tr["safety"] != "normal" or game == "eu4":
+            new = normalize_punct(source, new)
+            bad = localisation.hard_problems(source, new, game)
+            if bad:
+                report.append([name, line.key, "revertida", source, "; ".join(bad)])
+                continue
+        try:
+            localisation.set_translation(loc, line, tr["write_columns"], new)
+        except ValueError as error:
+            report.append([name, line.key, "revertida", source, str(error)])
+            continue
+        changed += 1
+    return changed
+
+
+def _write_report(out_root: Path, mod: Mod, report: list[list[str]]) -> None:
     rep = out_root / f"{mod.slug}_relatorio.csv"
     if report or rep.exists():
         out_root.mkdir(parents=True, exist_ok=True)
@@ -257,9 +293,104 @@ def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None
                 w.writerows(report)
         if report:
             print(f"  {len(report)} linhas ficaram em inglês (veja {rep})")
+    reverted = sum(row[2] == "revertida" for row in report)
     if reverted:
         print(f"  {reverted} linha(s) voltaram ao inglês pela trava de segurança (veja o relatório)")
-    print(f"  resumo: {counts}")
+
+
+def _overlay_policy(cfg: dict, translator: Translator) -> bytes:
+    tr, model = cfg["translate"], cfg["model"]
+    fields = ("source_column", "write_columns", "safety", "context", "ptbr_fix", "reuse_cache_from")
+    settings = [tr.get(key) for key in fields]
+    model_settings = [model.get(key) for key in ("host", "source_lang", "target_lang", "temperature", "providers")]
+    values = [__version__, PROMPT_VERSION, get_profile(cfg).id, translator.backend.model_id, model_settings,
+              settings, cfg["keep_terms"], list(cfg["glossary_terms"].items()), list(cfg["replacements"].items())]
+    return hashlib.sha256(json.dumps(values, ensure_ascii=True).encode("ascii")).digest()
+
+
+def _translate_overlay(mod: Mod, cfg: dict, translator: Translator, limit: int | None) -> int:
+    tr = cfg["translate"]
+    directory = _translation_directory(cfg, mod)
+    files, completed = _read_manifest(cfg, directory)
+    files.update(p.relative_to(directory).as_posix() for p in _generated_files(cfg, directory))
+    policy = _overlay_policy(cfg, translator)
+    sources = loc_files(mod, cfg)
+    print(f"\n== {mod.name}: {len(sources)} arquivos para traduzir")
+
+    counts = collections.Counter({"ok": 0, "cache": 0, "skip": 0, "falha": 0})
+    report: list[list[str]] = []
+    selected: set[str] = set()
+    failed_texts: dict[str, Result] = {}
+    consecutive = reused = 0
+    descriptors_written = False
+
+    for index, path in enumerate(sources, 1):
+        relative = path.relative_to(mod.loc_dir)
+        name = relative.as_posix()
+        target = directory / relative
+        if not target.resolve().is_relative_to(directory.parent.resolve()):
+            raise ConfigError(f"Arquivo de saída fora da pasta do mod traduzido: {target}")
+        data = path.read_bytes()
+        # O registro só vale para estes bytes de origem, esta configuração e
+        # os mesmos bytes de destino que foram gravados com sucesso.
+        fingerprint = policy + hashlib.sha256(data).digest()
+        if limit is None and name in completed and target.is_file():
+            with target.open("rb") as stream:
+                output_hash = hashlib.file_digest(stream, "sha256").digest()
+            if completed[name] == hashlib.sha256(fingerprint + output_hash).hexdigest():
+                reused += 1
+                continue
+
+        loc = _read_loc(path, cfg, data=data)
+        todo = []
+        results = {}
+        for text in dict.fromkeys(text for _, text in localisation.source_entries(loc, tr["source_column"])):
+            if limit is not None and text not in selected:
+                if len(selected) >= limit:
+                    continue
+                selected.add(text)
+            if text in failed_texts:
+                results[text] = failed_texts[text]
+            else:
+                todo.append(text)
+
+        if todo:
+            print(f"  [{index}/{len(sources)}] {name}")
+            batch, file_counts, _, consecutive = _translate_batch(
+                translator, todo, tr["workers"], consecutive=consecutive)
+            print()
+            results.update(batch)
+            failed_texts.update((text, result) for text, result in batch.items() if result.status == "falha")
+            counts.update(file_counts)
+        before = len(report)
+        changed = _apply_translations(loc, name, cfg, results, report)
+        if changed or target.exists():
+            if not descriptors_written:
+                write_descriptors(tr["output_dir"], mod, cfg)
+                descriptors_written = True
+            output = loc.to_bytes()
+            atomic_write(target, output)
+            files.add(name)
+            if limit is None and len(report) == before and consecutive < _MAX_CONSECUTIVE_BACKEND_FAILURES:
+                completed[name] = hashlib.sha256(fingerprint + hashlib.sha256(output).digest()).hexdigest()
+            else:
+                completed.pop(name, None)
+            _write_manifest(cfg, directory, files, completed)
+            print(f"  gravado: {target}  ({changed} linhas)")
+        if consecutive >= _MAX_CONSECUTIVE_BACKEND_FAILURES:
+            deferred = len(todo) - len(batch)
+            print(f"  O backend falhou repetidamente. No arquivo atual, {deferred} texto(s) "
+                  "ficaram para a próxima execução.")
+            if index < len(sources):
+                print(f"  {len(sources) - index} arquivo(s) seguintes ficaram para a próxima execução.")
+            break
+
+    if reused and not descriptors_written:
+        write_descriptors(tr["output_dir"], mod, cfg)
+    if reused:
+        print(f"  {reused} arquivo(s) concluído(s) reaproveitado(s) da saída.")
+    _write_report(tr["output_dir"], mod, report)
+    print(f"  resumo: {dict(counts)}")
     return len(report)
 
 
@@ -321,12 +452,10 @@ def cmd_translate(cfg: dict, mods: list[Mod], backend_override: str | None, limi
         if cfg["replacements"] or cfg["translate"]["ptbr_fix"]:
             print(f"Pós-edição: ptbr_fix={'sim' if cfg['translate']['ptbr_fix'] else 'não'}, "
                   f"{len(cfg['replacements'])} substituições suas")
-        ids = translator.reuse_ids()
-        if ids:
-            print(f"Reaproveitando o que já foi traduzido por: {', '.join(ids)}")
         failures = sum(translate_mod(m, cfg, translator, limit) for m in mods)
-        if ids:
-            print(f"Textos reaproveitados de outros backends: {translator.reused}")
+        if translator.reused:
+            ids = ", ".join(translator.reuse_ids())
+            print(f"Textos reaproveitados de outros backends: {translator.reused} ({ids})")
         if getattr(backend, "stats", None):
             print(f"Pedidos por serviço: {backend.stats}")
     except BackendError as e:
@@ -349,7 +478,7 @@ def _est_seconds_per_text(backend) -> float | None:
     if lim is None:
         return None
     per = sum(lim.pause) / 2 + (sum(lim.long_pause) / 2 / lim.long_every if lim.long_every else 0)
-    return max(per, 60 / lim.per_minute if lim.per_minute else 0)
+    return max(per, 60 / lim.per_minute if lim.per_minute else 0, 3600 / lim.per_hour if lim.per_hour else 0)
 
 
 def cmd_status(cfg: dict, mods: list[Mod], backend_override: str | None) -> int:
@@ -548,10 +677,10 @@ def _generated_files(cfg: dict, directory: Path) -> list[Path]:
     return sorted(p for p in paths if p.is_file() and p.suffix.lower() == profile.suffix)
 
 
-def _read_manifest(cfg: dict, directory: Path) -> set[str]:
+def _read_manifest(cfg: dict, directory: Path) -> tuple[set[str], dict[str, str]]:
     manifest = directory.parent / _MANIFEST_NAME
     if not manifest.exists():
-        return set()  # Traduções antigas continuam verificáveis.
+        return set(), {}  # Traduções antigas continuam verificáveis.
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
         if (not isinstance(data, dict) or data.get("version") != 1
@@ -563,18 +692,18 @@ def _read_manifest(cfg: dict, directory: Path) -> set[str]:
                     or any(part in ("", ".", "..") for part in name.split("/"))
                     or PurePosixPath(name).suffix.lower() != get_profile(cfg).suffix):
                 raise ValueError("caminho de arquivo inválido")
-        return set(data["files"])
+        files = set(data["files"])
+        completed = data.get("completed", {})
+        if (not isinstance(completed, dict) or any(name not in files or not isinstance(stamp, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", stamp) for name, stamp in completed.items())):
+            raise ValueError("registro de arquivos concluídos inválido")
+        return files, completed
     except (ValueError, UnicodeError) as error:
         raise ConfigError(f"Manifesto inválido em {manifest}: {error}") from error
 
 
-def _write_manifest(cfg: dict, mod: Mod) -> None:
-    directory = _translation_directory(cfg, mod)
-    # Mantém a lista anterior para que uma execução parcial não esconda um
-    # arquivo apagado fora do tradutor. Arquivos regenerados voltam a existir.
-    files = _read_manifest(cfg, directory)
-    files.update(path.relative_to(directory).as_posix() for path in _generated_files(cfg, directory))
-    data = {"version": 1, "game": get_profile(cfg).id, "files": sorted(files)}
+def _write_manifest(cfg: dict, directory: Path, files: set[str], completed: dict[str, str]) -> None:
+    data = {"version": 1, "game": get_profile(cfg).id, "files": sorted(files), "completed": completed}
     atomic_write(directory.parent / _MANIFEST_NAME,
                  (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
@@ -584,7 +713,8 @@ def _translation_pairs(cfg: dict, mod: Mod) -> list[tuple[Path, Path]]:
     directory = _translation_directory(cfg, mod)
     files = set(_generated_files(cfg, directory))
     if tr["mode"] == "overlay":
-        files.update(directory / name for name in _read_manifest(cfg, directory))
+        expected, _ = _read_manifest(cfg, directory)
+        files.update(directory / name for name in expected)
     files = sorted(files)
     return ([(mod.loc_dir / p.relative_to(directory), p) for p in files] if tr["mode"] == "overlay"
             else [(p, mod.loc_dir / p.relative_to(directory)) for p in files])

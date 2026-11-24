@@ -151,13 +151,24 @@ Teste a tradução dentro do jogo antes de distribuí-la; a verificação não a
 Novas saídas guardam `translation_manifest.json` com os arquivos gerados: se um deles for apagado,
 a verificação acusa a ausência e o pacote é recusado. Traduções antigas sem esse arquivo continuam aceitas.
 
-O cache permite retomar uma execução interrompida. O programa valida traduções armazenadas antes de usá-las.
+O cache grava cada tradução concluída e permite retomar uma execução interrompida. O programa valida
+traduções armazenadas antes de usá-las.
 Se todos os textos selecionados estiverem resolvidos pelo cache, pelo glossário ou pelas regras de exclusão,
-`translate` reconstrói a saída sem iniciar o backend de tradução.
+`translate` pode reconstruir a saída sem iniciar o backend de tradução.
+No modo `overlay`, o programa grava cada arquivo ao terminá-lo. Em uma nova execução completa, ele pula
+os arquivos já concluídos quando a origem, a saída e as opções de tradução continuam iguais. Arquivos
+incompletos, alterados ou apagados são reprocessados com ajuda do cache. Se uma execução for interrompida
+no meio de um arquivo, as traduções já salvas no SQLite também serão reaproveitadas.
 Se uma linha não passar nas proteções, mantém o original e registra o motivo em
 `saida/<mod>_relatorio.csv`. Uma nova execução atualiza esse relatório.
-Reexecutar a tradução reconstrói os arquivos processados a partir do original; `--limit` limita os textos
-incluídos nessa execução. Para a versão completa, execute novamente sem `--limit`.
+Falhas isoladas do backend também entram no relatório. Após cinco falhas seguidas em um mod,
+o programa grava o que já conseguiu em `overlay` e deixa o restante para uma nova execução. No modo
+`inplace`, falhas do backend preservam o mod original para permitir a retomada.
+`model.timeout` ajusta o tempo de espera das operações de rede em `google` e `translators` (30 s)
+e em `ollama` e `openai` (180 s). Os servidores Ollama e OpenAI compatível exigem HTTPS fora
+do próprio computador.
+`--limit` usa os primeiros N textos únicos do mod e reconstrói os arquivos processados a partir do original.
+Para completar a tradução, rode novamente sem `--limit`.
 
 | Comando/opção | Finalidade |
 | --- | --- |

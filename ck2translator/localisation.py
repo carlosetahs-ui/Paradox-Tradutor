@@ -9,11 +9,14 @@ from .profiles import get_profile
 _FORMATS = {"ck2": ck2loc, "eu4": eu4loc}
 
 
-def read(path: Path, game: str, *, ignore_invalid: bool = False):
+def read(path: Path, game: str, *, ignore_invalid: bool = False, data: bytes | None = None):
+    path = Path(path)
     game = get_profile(game).id
+    if data is None:
+        data = path.read_bytes()
     if game == "eu4":
-        return eu4loc.LocFile.read(path, ignore_invalid=ignore_invalid)
-    return _FORMATS[game].LocFile.read(path)
+        return eu4loc.LocFile.from_bytes(path, data, ignore_invalid=ignore_invalid)
+    return _FORMATS[game].LocFile.from_bytes(path, data)
 
 
 def source_entries(loc, language: str):

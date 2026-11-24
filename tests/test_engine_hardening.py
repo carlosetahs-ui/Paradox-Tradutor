@@ -2,11 +2,13 @@
 import io
 import threading
 import unittest
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest import mock
 
 from ck2translator.translator import (
-    BackendError, GoogleBackend, OllamaBackend, OpenAICompatBackend, _post_json,
+    BackendError, GoogleBackend, OllamaBackend, OpenAICompatBackend, TextBackendError, _post_json,
 )
 
 
@@ -14,14 +16,65 @@ class EngineHardeningTests(unittest.TestCase):
     def test_invalid_json_utf8_or_json_shape_raises_backend_error(self):
         for raw in (b"<html>unavailable</html>", b"\xff", b"[]", b"null"):
             with self.subTest(raw=raw), mock.patch("ck2translator.translator.urllib.request.urlopen") as opened:
-                opened.return_value.__enter__.return_value.read.return_value = raw
+                opened.return_value = io.BytesIO(raw)
                 with self.assertRaises(BackendError):
                     _post_json("http://localhost/test", {}, 1)
 
     def test_valid_json_object_is_returned(self):
         with mock.patch("ck2translator.translator.urllib.request.urlopen") as opened:
-            opened.return_value.__enter__.return_value.read.return_value = b'{"message":{"content":"Ola"}}'
+            opened.return_value = io.BytesIO(b'{"message":{"content":"Ola"}}')
             self.assertEqual(_post_json("http://localhost/test", {}, 1), {"message": {"content": "Ola"}})
+
+    def test_model_requests_retry_503_and_respect_retry_after(self):
+        failure = urllib.error.HTTPError("https://example.test", 503, "Unavailable",
+                                         {"Retry-After": "7"}, io.BytesIO())
+        response = io.BytesIO(b'{"message":{"content":"Ola"}}')
+        with mock.patch("ck2translator.translator.urllib.request.urlopen", side_effect=[failure, response]) as request, \
+                mock.patch("ck2translator.translator.time.sleep") as sleep:
+            self.assertEqual(_post_json("https://example.test", {}, 3), {"message": {"content": "Ola"}})
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(7)
+
+    def test_response_with_continuous_small_chunks_obeys_reading_deadline(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read1.return_value = b"x"
+        with mock.patch("ck2translator.translator.urllib.request.urlopen", return_value=response), \
+                mock.patch("ck2translator.translator.time.monotonic", side_effect=[0, 0.5, 1.5]):
+            with self.assertRaisesRegex(TextBackendError, "TimeoutError"):
+                _post_json("https://example.test", {}, 1, retries=0)
+        response.__enter__.return_value.read1.assert_called_once()
+
+    def test_remote_plain_http_is_refused_and_credentials_do_not_follow_redirects(self):
+        for backend in (OllamaBackend, OpenAICompatBackend):
+            with self.subTest(backend=backend), self.assertRaisesRegex(BackendError, "HTTPS"):
+                backend("model", host="http://server.example.test")
+        with mock.patch("ck2translator.translator.urllib.request.urlopen") as opened:
+            error = urllib.error.HTTPError("https://example.test", 401, "", {}, io.BytesIO(b"secret"))
+            opened.side_effect = error
+            with self.assertRaisesRegex(BackendError, "401") as caught:
+                OpenAICompatBackend("model", host="https://example.test/v1", api_key="secret").chat("", "hello")
+            opened.assert_called_once()
+            request = opened.call_args.args[0]
+            self.assertEqual(request.unredirected_hdrs["Authorization"], "Bearer secret")
+            self.assertNotIn("Authorization", request.headers)
+            self.assertNotIn("secret", str(caught.exception))
+
+    def test_google_transport_uses_timeout_and_does_not_log_the_query_on_failure(self):
+        dependencies = {
+            "deep_translator": SimpleNamespace(GoogleTranslator=lambda **_: SimpleNamespace(source="en", target="pt")),
+            "bs4": SimpleNamespace(BeautifulSoup=mock.Mock()),
+        }
+        with mock.patch.dict("sys.modules", dependencies), \
+                mock.patch("ck2translator.translator.urllib.request.build_opener") as builder, \
+                mock.patch("ck2translator.translator.time.sleep"):
+            backend = GoogleBackend(timeout=7, pause=(0, 0), retry_wait=0)
+            opener = builder.return_value
+            opener.open.side_effect = TimeoutError("private source text")
+            with self.assertRaises(TextBackendError) as caught:
+                backend.chat("", "private source text")
+        self.assertEqual(opener.open.call_count, 3)
+        self.assertTrue(all(call.kwargs["timeout"] == 7 for call in opener.open.call_args_list))
+        self.assertNotIn("private", str(caught.exception))
 
     def test_local_backends_reject_nontextual_or_empty_content(self):
         for content in (None, [], 42, "", "  "):

@@ -49,33 +49,52 @@
 id = "ck2"                 # opcional: configurações sem [game] continuam usando CK2
 
 [model]
-# translators | google | argos | ollama | openai | echo
-# Instalação: python -m pip install -e ".[translators]"
+# Troque o valor de backend e descomente só as opções do backend escolhido.
 backend = "translators"
-
-# Serviços online: pausas e limites globais de pedidos.
-providers = ["google", "bing", "alibaba", "yandex"]
-source_lang = "en"
+source_lang = "en"           # translators, google e argos
 target_lang = "pt"
-max_per_minute = 20          # 0 desativa este limite
-max_per_hour = 600          # 0 desativa este limite
-pause_min = 1.5
-pause_max = 4.0
-long_pause_every = 80        # 0 desativa a pausa longa
-long_pause_min = 40
-long_pause_max = 90
-cooldown = 600
-max_retries = 4
-backoff_base = 15
-max_chars = 3000
 
-# Usados por ollama/openai. LM Studio: http://localhost:1234/v1
-name = "qwen2.5:7b-instruct"
-host = "http://localhost:11434"
-temperature = 0.2
-timeout = 180
-# api_key = ""              # somente openai; não versione credenciais
-# long_pause = 30           # duração da pausa longa do backend google
+# translators: python -m pip install -e ".[translators]"
+# Limites compartilhados pelos workers. Zero desativa o limite ou a pausa longa.
+# providers = ["google", "bing", "alibaba", "yandex"]
+# max_per_minute = 20
+# max_per_hour = 600
+# pause_min = 1.5
+# pause_max = 4.0
+# long_pause_every = 80
+# long_pause_min = 40
+# long_pause_max = 90
+# cooldown = 600
+# max_retries = 4
+# backoff_base = 15
+# max_chars = 3000
+# timeout = 30               # em segundos para operações de rede
+
+# google: python -m pip install -e ".[google]"
+# pause_min = 1.0
+# pause_max = 2.0
+# long_pause_every = 100
+# long_pause = 30
+# timeout = 30               # em segundos para operações de rede
+
+# argos: python -m pip install -e ".[argos]"
+# Rode python ck2tr.py argos-setup uma vez para baixar o pacote en -> pt.
+
+# ollama: inicie o servidor e use o nome exato do modelo instalado.
+# name = "qwen2.5:7b-instruct"
+# host = "http://localhost:11434"
+# temperature = 0.2
+# timeout = 180               # em segundos para operações de rede
+
+# openai: inicie o servidor compatível. Exemplo para LM Studio.
+# name = "id-do-modelo-no-servidor"
+# host = "http://localhost:1234/v1"
+# temperature = 0.2
+# timeout = 180
+# api_key = ""                # se o servidor exigir, preencha só no TOML local
+# Ollama e OpenAI compatível exigem HTTPS fora desta máquina.
+
+# echo: acrescenta "PT> " para testar a geração de arquivos sem rede.
 
 [translate]
 source_column = "english"
@@ -85,7 +104,7 @@ mode = "overlay"            # mod separado; inplace altera o original com backup
 output_dir = "saida"
 cache = "data/cache/cache.sqlite"
 reuse_cache_from = "auto"   # ou ["google", "argos", "ollama"]; [] desativa
-workers = 1                 # serviços online compartilham o limitador de pedidos
+workers = 1                 # comece com um worker para serviços online
 safety = "strict"           # normal | strict | paranoid (pula textos com códigos)
 skip_files = []             # aceita padrões, ex.: ["*_baronies.csv"]
 context = "Fantasia medieval em um mod para Crusader Kings II."
