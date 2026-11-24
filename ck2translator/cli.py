@@ -13,6 +13,7 @@ import collections
 import csv
 import fnmatch
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -29,11 +30,12 @@ from threading import Event, Lock
 from .ck2loc import EU4_TOKEN_RE, TOKEN_RE
 from . import localisation, revisao
 from .config import BACKENDS, ConfigError, Mod, load_config, resolve_mods
-from .files import atomic_path, atomic_write
+from .files import atomic_path, atomic_write, write_if_changed
 from .profiles import get_profile, write_descriptors
 from .quality import quality_problems, unchanged_prose
 from . import __version__
-from .translator import (PROMPT_VERSION, ArgosBackend, Backend, BackendError, Cache, EchoBackend, GoogleBackend, OllamaBackend,
+from .translator import (PROMPT_VERSION, ArgosBackend, Backend, BackendError, Cache, EchoBackend, GeminiBackend,
+                        GoogleBackend, OllamaBackend,
                         OpenAICompatBackend, RateLimiter, Result, TextBackendError, Translator, TranslatorsBackend,
                         fit_cp1252, install_argos_package, mask, normalize_punct, translation_cancel)
 
@@ -44,7 +46,7 @@ def loc_files(mod: Mod, cfg: dict) -> list[Path]:
     profile = get_profile(cfg)
     paths = mod.loc_dir.rglob("*") if profile.recursive else mod.loc_dir.iterdir()
     return sorted(p for p in paths
-                  if p.is_file() and p.suffix.lower() == profile.suffix
+                  if p.suffix.lower() == profile.suffix and p.is_file()
                   and not any(fnmatch.fnmatch(p.name.lower(), pat) or
                               fnmatch.fnmatch(p.relative_to(mod.loc_dir).as_posix().lower(), pat)
                               for pat in skip))
@@ -80,11 +82,23 @@ def build_backend(cfg: dict, override: str | None, *, offline: bool = False):
         pause = float(m.get("long_pause", 30))
         limiter = RateLimiter(0, 0, (float(m.get("pause_min", 1)), float(m.get("pause_max", 2))),
                               int(m.get("long_pause_every", 100)), (pause, pause))
+    elif kind == "gemini":
+        limiter = RateLimiter(int(m.get("max_per_minute", 10)), int(m.get("max_per_hour", 0)),
+                              (float(m.get("pause_min", 0)), float(m.get("pause_max", 0))),
+                              int(m.get("long_pause_every", 0)),
+                              (float(m.get("long_pause_min", 0)), float(m.get("long_pause_max", 0))))
     if offline:
         backend = Backend()
-        backend.model_id = f"{kind}:{m.get('name', '')}" if kind in ("ollama", "openai") else kind
-        backend.uses_prompt = kind in ("ollama", "openai", "echo")
+        model = m.get("name", "")
+        if kind == "gemini":
+            canonical = GeminiBackend.model_name(model)
+            if canonical != model:
+                backend.legacy_model_id = f"gemini:{model}"
+            model = canonical
+        backend.model_id = f"{kind}:{model}" if kind in ("ollama", "openai", "gemini") else kind
+        backend.uses_prompt = kind in ("ollama", "openai", "gemini", "echo")
         backend.limiter = limiter
+        backend.batch_size = int(m.get("batch_size", 1)) if kind == "gemini" else 1
         return backend
     if kind == "echo":
         return EchoBackend()
@@ -109,6 +123,9 @@ def build_backend(cfg: dict, override: str | None, *, offline: bool = False):
     if kind == "openai":
         return OpenAICompatBackend(name, m.get("host", "http://localhost:1234/v1"), temp, timeout,
                                    m.get("api_key", ""))
+    if kind == "gemini":
+        return GeminiBackend(name, m.get("api_key", ""), temp, timeout, limiter,
+                             int(m.get("batch_size", 1)))
     raise ConfigError(f"backend desconhecido: {kind}")
 
 
@@ -116,15 +133,21 @@ def build_backend(cfg: dict, override: str | None, *, offline: bool = False):
 def cmd_scan(cfg: dict, mods: list[Mod]) -> int:
     tr = cfg["translate"]
     src_name = tr["source_column"]
+    ck2 = get_profile(cfg).id == "ck2"
+    seen_in: dict[str, list[str]] = {}
     for mod in mods:
         print(f"\n== {mod.name}  ({mod.path})")
         uniq: set[str] = set()
         total_chars = total_entries = 0
         for p in loc_files(mod, cfg):
+            name = p.relative_to(mod.loc_dir).as_posix()
+            seen_in.setdefault(name.lower(), []).append(mod.name)
             loc = _read_loc(p, cfg)
-            n_entries = sum(1 for _ in loc.entries())
-            odd = (sum(len(ln.fields) != 15 for ln in loc.entries())
-                   if get_profile(cfg).id == "ck2" else 0)
+            n_entries = odd = 0
+            for line in loc.entries():
+                n_entries += 1
+                if ck2 and len(line.fields) != 15:
+                    odd += 1
             n_src = 0
             for _, text in localisation.source_entries(loc, src_name):
                 n_src += 1
@@ -132,13 +155,9 @@ def cmd_scan(cfg: dict, mods: list[Mod]) -> int:
                 total_chars += len(text)
             total_entries += n_src
             flag = f"  [{odd} linhas com nº de colunas != 15]" if odd else ""
-            print(f"  {p.relative_to(mod.loc_dir).as_posix():<45} {loc.encoding:<9} {n_entries:>6} entradas, "
+            print(f"  {name:<45} {loc.encoding:<9} {n_entries:>6} entradas, "
                   f"{n_src:>6} com texto em '{src_name}'{flag}")
         print(f"  -> {total_entries} textos ({len(uniq)} únicos), ~{total_chars:,} caracteres")
-    seen_in: dict[str, list[str]] = {}
-    for mod in mods:
-        for p in loc_files(mod, cfg):
-            seen_in.setdefault(p.relative_to(mod.loc_dir).as_posix().lower(), []).append(mod.name)
     clash = {n: m for n, m in seen_in.items() if len(set(m)) > 1}
     if clash:
         print("\nATENÇÃO: arquivos com o MESMO NOME em mods diferentes (no jogo, o que carrega por último vence).")
@@ -232,19 +251,19 @@ def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None
     todo = list(texts)[:limit] if limit is not None else list(texts)
     print(f"\n== {mod.name}: {len(locs)} arquivos, {len(todo)} textos únicos para traduzir")
 
-    results, counts, errors, _ = _translate_batch(translator, todo, tr["workers"])
+    results, counts, _, _ = _translate_batch(translator, todo, tr["workers"])
     print()
     deferred = len(todo) - len(results)
     if deferred:
         print(f"  O backend falhou repetidamente. {deferred} texto(s) ficaram para a próxima execução.")
-    if errors:
+    if counts["falha"]:
         print("  O mod original foi preservado. Rode novamente para retomar pelo cache.")
 
     report: list[list[str]] = []
     for loc in locs:
         relative = loc.path.relative_to(mod.loc_dir)
         changed = _apply_translations(loc, relative.as_posix(), cfg, results, report)
-        if changed and not errors:
+        if changed and not counts["falha"]:
             backup_file = backup / "localisation" / relative
             backup_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(loc.path, backup_file)
@@ -255,11 +274,13 @@ def translate_mod(mod: Mod, cfg: dict, translator: Translator, limit: int | None
     return len(report)
 
 
-def _apply_translations(loc, name: str, cfg: dict, results: dict[str, Result], report: list[list[str]]) -> int:
+def _apply_translations(loc, name: str, cfg: dict, results: dict[str, Result], report: list[list[str]],
+                        *, source_loc=None) -> int:
     tr = cfg["translate"]
     game = get_profile(cfg).id
     changed = 0
-    for line, source in localisation.source_entries(loc, tr["source_column"]):
+    original = loc if source_loc is None else source_loc
+    for line, source in localisation.source_entries(original, tr["source_column"], destination=loc):
         res = results.get(source)
         if res is None or res.status == "skip":
             continue
@@ -285,12 +306,11 @@ def _apply_translations(loc, name: str, cfg: dict, results: dict[str, Result], r
 def _write_report(out_root: Path, mod: Mod, report: list[list[str]]) -> None:
     rep = out_root / f"{mod.slug}_relatorio.csv"
     if report or rep.exists():
-        out_root.mkdir(parents=True, exist_ok=True)
-        with atomic_path(rep) as temporary:
-            with temporary.open("w", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f, delimiter=";")
-                w.writerow(["arquivo", "chave", "status", "original", "motivo"])
-                w.writerows(report)
+        with io.StringIO(newline="") as f:
+            writer = csv.writer(f, delimiter=";")
+            writer.writerow(["arquivo", "chave", "status", "original", "motivo"])
+            writer.writerows(report)
+            write_if_changed(rep, f.getvalue().encode("utf-8-sig"))
         if report:
             print(f"  {len(report)} linhas ficaram em inglês (veja {rep})")
     reverted = sum(row[2] == "revertida" for row in report)
@@ -308,10 +328,19 @@ def _overlay_policy(cfg: dict, translator: Translator) -> bytes:
     return hashlib.sha256(json.dumps(values, ensure_ascii=True).encode("ascii")).digest()
 
 
+def _text_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _output_stamp(fingerprint: bytes, output: bytes) -> str:
+    return hashlib.sha256(fingerprint + hashlib.sha256(output).digest()).hexdigest()
+
+
 def _translate_overlay(mod: Mod, cfg: dict, translator: Translator, limit: int | None) -> int:
     tr = cfg["translate"]
     directory = _translation_directory(cfg, mod)
-    files, completed = _read_manifest(cfg, directory)
+    files, completed, partial = _read_manifest(cfg, directory)
+    recorded_files = files.copy()
     files.update(p.relative_to(directory).as_posix() for p in _generated_files(cfg, directory))
     policy = _overlay_policy(cfg, translator)
     sources = loc_files(mod, cfg)
@@ -334,17 +363,22 @@ def _translate_overlay(mod: Mod, cfg: dict, translator: Translator, limit: int |
         # O registro só vale para estes bytes de origem, esta configuração e
         # os mesmos bytes de destino que foram gravados com sucesso.
         fingerprint = policy + hashlib.sha256(data).digest()
-        if limit is None and name in completed and target.is_file():
-            with target.open("rb") as stream:
-                output_hash = hashlib.file_digest(stream, "sha256").digest()
-            if completed[name] == hashlib.sha256(fingerprint + output_hash).hexdigest():
-                reused += 1
-                continue
+        previous = target.read_bytes() if target.is_file() else None
+        stamp = _output_stamp(fingerprint, previous) if previous is not None else None
+        if limit is None and stamp is not None and completed.get(name) == stamp:
+            reused += 1
+            continue
 
-        loc = _read_loc(path, cfg, data=data)
+        original = _read_loc(path, cfg, data=data)
+        candidates = dict.fromkeys(text for _, text in localisation.source_entries(original, tr["source_column"]))
+        checkpoint = partial.get(name)
+        resumed = limit is None and checkpoint is not None and checkpoint["stamp"] == stamp
+        if resumed:
+            pending_hashes = set(checkpoint["texts"])
+            candidates = {text: None for text in candidates if _text_digest(text) in pending_hashes}
         todo = []
         results = {}
-        for text in dict.fromkeys(text for _, text in localisation.source_entries(loc, tr["source_column"])):
+        for text in candidates:
             if limit is not None and text not in selected:
                 if len(selected) >= limit:
                     continue
@@ -354,6 +388,8 @@ def _translate_overlay(mod: Mod, cfg: dict, translator: Translator, limit: int |
             else:
                 todo.append(text)
 
+        if limit is not None and not todo and not results:
+            continue
         if todo:
             print(f"  [{index}/{len(sources)}] {name}")
             batch, file_counts, _, consecutive = _translate_batch(
@@ -362,21 +398,38 @@ def _translate_overlay(mod: Mod, cfg: dict, translator: Translator, limit: int |
             results.update(batch)
             failed_texts.update((text, result) for text, result in batch.items() if result.status == "falha")
             counts.update(file_counts)
+        loc = original
+        if resumed and any(result.status in ("ok", "cache") for result in results.values()):
+            loc = localisation.read(target, get_profile(cfg).id, ignore_invalid=True, data=previous)
+            loc.encoding = original.encoding
         before = len(report)
-        changed = _apply_translations(loc, name, cfg, results, report)
-        if changed or target.exists():
+        changed = _apply_translations(loc, name, cfg, results, report, source_loc=original)
+        if changed or previous is not None:
             if not descriptors_written:
                 write_descriptors(tr["output_dir"], mod, cfg)
                 descriptors_written = True
-            output = loc.to_bytes()
-            atomic_write(target, output)
+            output = previous if resumed and not changed else loc.to_bytes()
+            if output != previous:
+                atomic_write(target, output)
+                print(f"  gravado: {target}  ({changed} linhas)")
+
+            pending = set(candidates) - results.keys()
+            pending.update(row[3] for row in report[before:])
+            if output != previous:
+                stamp = _output_stamp(fingerprint, output)
+            complete = stamp if limit is None and not pending else None
+            saved_partial = {"stamp": stamp, "texts": sorted(_text_digest(text) for text in pending)} if pending else None
             files.add(name)
-            if limit is None and len(report) == before and consecutive < _MAX_CONSECUTIVE_BACKEND_FAILURES:
-                completed[name] = hashlib.sha256(fingerprint + hashlib.sha256(output).digest()).hexdigest()
-            else:
+            if (name not in recorded_files or completed.get(name) != complete
+                    or checkpoint != saved_partial):
                 completed.pop(name, None)
-            _write_manifest(cfg, directory, files, completed)
-            print(f"  gravado: {target}  ({changed} linhas)")
+                partial.pop(name, None)
+                if complete is not None:
+                    completed[name] = complete
+                if saved_partial is not None:
+                    partial[name] = saved_partial
+                _write_manifest(cfg, directory, files, completed, partial)
+                recorded_files.update(files)
         if consecutive >= _MAX_CONSECUTIVE_BACKEND_FAILURES:
             deferred = len(todo) - len(batch)
             print(f"  O backend falhou repetidamente. No arquivo atual, {deferred} texto(s) "
@@ -404,7 +457,9 @@ class _LazyBackend(Backend):
 
     def __init__(self, metadata: Backend, factory: Callable[[], Backend]):
         self.model_id = metadata.model_id
+        self.legacy_model_id = metadata.legacy_model_id
         self.uses_prompt = metadata.uses_prompt
+        self.batch_size = getattr(metadata, "batch_size", 1)
         self._factory = factory
         self._backend: Backend | None = None
         self._lock = Lock()
@@ -428,7 +483,16 @@ def make_translator(cfg: dict, backend_override: str | None, *, offline: bool = 
     cache = Cache(str(cfg["translate"]["cache"]), read_only=offline)
     name = cfg["model"].get("name", "")
     rc = cfg["translate"]["reuse_cache_from"]
-    reuse = "auto" if rc == "auto" else [f"{r}:{name}" if r in ("ollama", "openai") else r for r in rc]
+    reuse = rc
+    if rc != "auto":
+        reuse = []
+        for entry in rc:
+            model_id = f"{entry}:{name}" if entry in ("ollama", "openai", "gemini") else entry
+            if model_id.startswith("gemini:"):
+                canonical = GeminiBackend.model_name(model_id.split(":", 1)[1])
+                reuse.append(f"gemini:{canonical}")
+            reuse.append(model_id)
+        reuse = list(dict.fromkeys(reuse))
     post = revisao.build(bool(cfg["translate"]["ptbr_fix"]), cfg.get("replacements"))
     translator = Translator(backend, cache, cfg["glossary_terms"], cfg["keep_terms"],
                             cfg["translate"].get("context", ""), reuse_from=reuse,
@@ -446,6 +510,11 @@ def cmd_translate(cfg: dict, mods: list[Mod], backend_override: str | None, limi
     backend, cache, translator = make_translator(cfg, backend_override)
     try:
         print(f"Modelo: {backend.model_id}  | modo: {cfg['translate']['mode']}  | segurança: {cfg['translate']['safety']}")
+        batch_size = getattr(backend, "batch_size", 1)
+        if batch_size > 1:
+            effective = min(batch_size, cfg["translate"]["workers"])
+            print(f"Lotes: até {effective} textos por pedido Gemini "
+                  f"(batch_size={batch_size}, workers={cfg['translate']['workers']})")
         if backend.model_id == "echo":
             print("Modo de teste echo: acrescenta 'PT> ' aos textos; não realiza tradução.")
         print(f"Termos: {len(cfg['keep_terms'])} para manter, {len(cfg['glossary_terms'])} no glossário")
@@ -472,13 +541,15 @@ def cmd_translate(cfg: dict, mods: list[Mod], backend_override: str | None, limi
 
 
 # --------------------------------------------------------------------------- status
-def _est_seconds_per_text(backend) -> float | None:
-    """Estimativa de segundos por texto para backends com limitador (translators/google)."""
+def _est_seconds_per_text(backend, workers: int) -> float | None:
+    """Estimativa de segundos por texto para backends com limitador (translators/google/gemini)."""
     lim = getattr(backend, "limiter", None)
     if lim is None:
         return None
     per = sum(lim.pause) / 2 + (sum(lim.long_pause) / 2 / lim.long_every if lim.long_every else 0)
-    return max(per, 60 / lim.per_minute if lim.per_minute else 0, 3600 / lim.per_hour if lim.per_hour else 0)
+    request_time = max(per, 60 / lim.per_minute if lim.per_minute else 0,
+                       3600 / lim.per_hour if lim.per_hour else 0)
+    return request_time / min(workers, getattr(backend, "batch_size", 1))
 
 
 def cmd_status(cfg: dict, mods: list[Mod], backend_override: str | None) -> int:
@@ -500,7 +571,7 @@ def cmd_status(cfg: dict, mods: list[Mod], backend_override: str | None) -> int:
             pct = 100 * (done + c["skip"]) / max(1, len(texts))
             print(f"{mod.name}: {len(texts)} textos únicos | prontos {done} | pulados {c['skip']} | "
                   f"faltam {pend}  ({pct:.0f}% resolvido)")
-        per = _est_seconds_per_text(backend)
+        per = _est_seconds_per_text(backend, cfg["translate"]["workers"])
         if total_pend and per:
             print(f"\nEstimativa para o que falta: ~{_fmt_time(per * total_pend)} (com as pausas anti-bloqueio).")
         elif not total_pend:
@@ -677,10 +748,14 @@ def _generated_files(cfg: dict, directory: Path) -> list[Path]:
     return sorted(p for p in paths if p.is_file() and p.suffix.lower() == profile.suffix)
 
 
-def _read_manifest(cfg: dict, directory: Path) -> tuple[set[str], dict[str, str]]:
+def _manifest_hash(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _read_manifest(cfg: dict, directory: Path) -> tuple[set[str], dict[str, str], dict[str, dict]]:
     manifest = directory.parent / _MANIFEST_NAME
     if not manifest.exists():
-        return set(), {}  # Traduções antigas continuam verificáveis.
+        return set(), {}, {}  # Traduções antigas continuam verificáveis.
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
         if (not isinstance(data, dict) or data.get("version") != 1
@@ -694,16 +769,27 @@ def _read_manifest(cfg: dict, directory: Path) -> tuple[set[str], dict[str, str]
                 raise ValueError("caminho de arquivo inválido")
         files = set(data["files"])
         completed = data.get("completed", {})
-        if (not isinstance(completed, dict) or any(name not in files or not isinstance(stamp, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", stamp) for name, stamp in completed.items())):
+        if (not isinstance(completed, dict) or any(name not in files or not _manifest_hash(stamp)
+                                                   for name, stamp in completed.items())):
             raise ValueError("registro de arquivos concluídos inválido")
-        return files, completed
+        partial = data.get("partial", {})
+        if not isinstance(partial, dict):
+            raise ValueError("registro de arquivos pendentes inválido")
+        for name, checkpoint in partial.items():
+            if (name not in files or name in completed or not isinstance(checkpoint, dict)
+                    or not _manifest_hash(checkpoint.get("stamp"))
+                    or not isinstance(checkpoint.get("texts"), list) or not checkpoint["texts"]
+                    or any(not _manifest_hash(item) for item in checkpoint["texts"])):
+                raise ValueError("registro de arquivos pendentes inválido")
+        return files, completed, partial
     except (ValueError, UnicodeError) as error:
         raise ConfigError(f"Manifesto inválido em {manifest}: {error}") from error
 
 
-def _write_manifest(cfg: dict, directory: Path, files: set[str], completed: dict[str, str]) -> None:
-    data = {"version": 1, "game": get_profile(cfg).id, "files": sorted(files), "completed": completed}
+def _write_manifest(cfg: dict, directory: Path, files: set[str], completed: dict[str, str],
+                    partial: dict[str, dict]) -> None:
+    data = {"version": 1, "game": get_profile(cfg).id, "files": sorted(files), "completed": completed,
+            "partial": partial}
     atomic_write(directory.parent / _MANIFEST_NAME,
                  (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
@@ -713,7 +799,7 @@ def _translation_pairs(cfg: dict, mod: Mod) -> list[tuple[Path, Path]]:
     directory = _translation_directory(cfg, mod)
     files = set(_generated_files(cfg, directory))
     if tr["mode"] == "overlay":
-        expected, _ = _read_manifest(cfg, directory)
+        expected, _, _ = _read_manifest(cfg, directory)
         files.update(directory / name for name in expected)
     files = sorted(files)
     return ([(mod.loc_dir / p.relative_to(directory), p) for p in files] if tr["mode"] == "overlay"
@@ -723,6 +809,9 @@ def _translation_pairs(cfg: dict, mod: Mod) -> list[tuple[Path, Path]]:
 def cmd_diff(cfg: dict, mods: list[Mod], find: str | None) -> int:
     """Mostra original x traduzido. Sem --find: só as linhas com algum aviso. Com --find: todas as que contêm o texto."""
     tr = cfg["translate"]
+    game = get_profile(cfg).id
+    token_re = EU4_TOKEN_RE if game == "eu4" else TOKEN_RE
+    query = find.lower() if find else None
     src_col, shown, total_warn = tr["source_column"], 0, 0
     for mod in mods:
         for src_path, dst_path in _translation_pairs(cfg, mod):
@@ -744,18 +833,18 @@ def cmd_diff(cfg: dict, mods: list[Mod], find: str | None) -> int:
                     tb = localisation.cell(dst, b, column)
                     if tb is None:
                         continue
+                    if query and not any(query in value.lower() for value in (a.key, ta, tb)):
+                        continue
                     unchanged = localisation.cell(src, a, column) == tb
                     warns = [] if unchanged else struct_warnings(ta, tb)
                     if not unchanged or ta == tb:
                         warns.extend(quality_problems(ta, tb))
-                    token_re = EU4_TOKEN_RE if get_profile(cfg).id == "eu4" else TOKEN_RE
                     if unchanged_prose(ta, tb, keep=cfg.get("keep_terms", []),
                                        glossary=cfg.get("glossary_terms", {}), token_re=token_re):
                         warns.append("prosa em inglês ficou igual ao original; confira se faltou traduzir")
-                    if get_profile(cfg).id == "eu4" and not unchanged:
-                        warns.extend(w for w in localisation.hard_problems(ta, tb, "eu4") if w not in warns)
-                    hit = find and any(find.lower() in x.lower() for x in (a.key, ta, tb))
-                    if not (hit if find else warns):
+                    if game == "eu4" and not unchanged:
+                        warns.extend(w for w in localisation.hard_problems(ta, tb, game) if w not in warns)
+                    if not query and not warns:
                         continue
                     if not printed_head:
                         print(head)
@@ -831,11 +920,11 @@ def main(argv: list[str] | None = None) -> int:
         if name in ("translate", "verify"):
             sp.add_argument("--mode", choices=["overlay", "inplace"], help="sobrescreve translate.mode")
         if name == "status":
-            sp.add_argument("--backend", choices=["translators", "ollama", "openai", "google", "argos", "echo"],
+            sp.add_argument("--backend", choices=BACKENDS,
                             help="calcula o que falta para ESTE backend")
         if name == "translate":
             sp.add_argument("--limit", type=_positive_int, help="traduz só os N primeiros textos de cada mod (teste)")
-            sp.add_argument("--backend", choices=["translators", "ollama", "openai", "google", "argos", "echo"],
+            sp.add_argument("--backend", choices=BACKENDS,
                             help="sobrescreve o backend da config ('echo' = teste sem IA)")
     for stream in (sys.stdout, sys.stderr):            # no Windows o console cp1252 quebraria com texto de outros alfabetos
         try:

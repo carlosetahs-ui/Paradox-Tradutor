@@ -90,12 +90,35 @@ class CliReviewTests(unittest.TestCase):
         self.assertTrue(missing.exists())
         self.assertEqual(self.run_cli("check")[0], 0)
 
+    def test_limit_preserves_an_existing_file_outside_the_selection(self):
+        for game in ("ck2", "eu4"):
+            with self.subTest(game=game):
+                self.configure(game)
+                self.translate()
+                second = self.generated / "localisation" / self.files[1]
+                previous = second.read_bytes()
+                self.translate("--limit", "1")
+                self.assertEqual(second.read_bytes(), previous)
+                manifest = json.loads((self.generated / "translation_manifest.json").read_text(encoding="utf-8"))
+                self.assertIn(self.files[1], manifest["completed"])
+
     def test_old_overlays_without_manifest_remain_supported(self):
         self.configure("eu4")
         self.translate()
         (self.generated / "translation_manifest.json").unlink()
         self.assertEqual(self.run_cli("check")[0], 0)
         self.assertEqual(self.run_cli("package")[0], 0)
+
+    def test_existing_identical_overlay_is_registered_without_rewriting_localisation(self):
+        self.configure("eu4")
+        self.translate()
+        manifest = self.generated / "translation_manifest.json"
+        manifest.unlink()
+        with mock.patch.object(cli, "atomic_write", wraps=cli.atomic_write) as write:
+            self.translate()
+        self.assertEqual([call.args[0] for call in write.call_args_list], [manifest, manifest])
+        records = json.loads(manifest.read_text(encoding="utf-8"))
+        self.assertEqual(set(records["completed"]), set(self.files))
 
     def test_invalid_manifest_cannot_reference_paths_outside_localisation(self):
         self.configure("eu4")
@@ -235,6 +258,46 @@ class CliReviewTests(unittest.TestCase):
         with mock.patch.object(EchoBackend, "chat", side_effect=AssertionError("backend chamado")):
             self.translate()
         self.assertTrue(second.is_file())
+        self.assertEqual(self.run_cli("check")[0], 0)
+
+    def test_gemini_rejections_do_not_stop_translation_and_resume_without_rewriting(self):
+        self.configure("eu4")
+        self.config.write_text(self.config.read_text(encoding="utf-8").replace(
+            "backend='echo'", "backend='gemini'\nname='models/gemini-test'\nmax_per_minute=0"
+        ), encoding="utf-8")
+        source = self.config.parent / "original" / "localisation" / self.files[0]
+        source.write_text("l_english:\n" + ''.join(f' blocked{i}:0 "Blocked {i}"\n' for i in range(6))
+                          + ' allowed:0 "Castle $NAME$"\n', encoding="utf-8-sig")
+        first, second = (self.generated / "localisation" / name for name in self.files)
+        calls = []
+
+        def api(url, payload, *args, **options):
+            text = payload["contents"][0]["parts"][0]["text"].splitlines()[1]
+            calls.append(text)
+            if text.startswith("Blocked"):
+                return {"promptFeedback": {"blockReason": "SAFETY"}}
+            return {"candidates": [{"finishReason": "STOP", "content": {"parts": [
+                {"text": text.replace("Castle", "Castelo").replace("Hello", "Olá")}
+            ]}}]}
+
+        with mock.patch.dict("os.environ", {}, clear=True):
+            code, log = self.run_cli("status")
+            self.assertEqual(code, 0, log)
+            self.assertIn("faltam 8", log)
+        with mock.patch.dict("os.environ", {"GEMINI_API_KEY": "test"}, clear=True), \
+                mock.patch("ck2translator.translator._post_json", side_effect=api):
+            code, log = self.run_cli("translate")
+            self.assertEqual(code, 1, log)
+            self.assertIn("Castle {1}", calls)
+            self.assertIn("Hello 1", calls)
+            self.assertTrue(second.exists())
+            self.assertIn('"Castelo $NAME$"', first.read_text(encoding="utf-8-sig"))
+            calls.clear()
+            with mock.patch.object(cli, "atomic_write", wraps=cli.atomic_write) as write:
+                code, log = self.run_cli("translate")
+            self.assertEqual(code, 1, log)
+            self.assertEqual(calls, [f"Blocked {i}" for i in range(6)])
+            write.assert_not_called()
         self.assertEqual(self.run_cli("check")[0], 0)
 
 

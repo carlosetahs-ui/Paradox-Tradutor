@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-translators = ["translators>=5.9,<6"]
+translators = ["translators>=5.9,<7"]
 google = ["deep-translator>=1.11,<2"]
 argos = ["argostranslate>=1.9,<2"]
 

@@ -12,7 +12,7 @@ Revise as sugestões e salve os termos aprovados em data/terms/keep.txt e glossa
   [glossary]  termos que viraram sempre a mesma palavra em português (ou que mudam de
               uma linha para outra, e por isso vale fixar). O sistema escolhe a tradução
               mais frequente: confira antes de usar.
-Os dois arquivos valem para todos os backends: ollama/openai recebem no prompt; translators/argos/google
+Os dois arquivos valem para todos os backends: ollama/openai/gemini recebem no prompt; translators/argos/google
 recebem como marcadores (o glossário entra com a tradução já pronta).
 """
 from __future__ import annotations

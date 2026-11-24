@@ -19,12 +19,14 @@ def read(path: Path, game: str, *, ignore_invalid: bool = False, data: bytes | N
     return _FORMATS[game].LocFile.from_bytes(path, data)
 
 
-def source_entries(loc, language: str):
+def source_entries(loc, language: str, *, destination=None):
     """Produz (linha, texto), somente para entradas traduzíveis do idioma escolhido."""
-    for line in loc.entries():
-        value = cell(loc, line, language)
-        if line.key and value is not None and value.strip():
-            yield line, value
+    lines = loc.lines if destination is None else destination.lines
+    for original, line in zip(loc.lines, lines, strict=True):
+        if original.is_entry and original.key:
+            value = cell(loc, original, language)
+            if value is not None and value.strip():
+                yield line, value
 
 
 def cell(loc, line, language: str) -> str | None:

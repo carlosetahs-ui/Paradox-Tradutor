@@ -1,8 +1,11 @@
 """Testes do backend Argos e do reaproveitamento 'auto' do cache (sem rede). Rode:  python -m unittest -v"""
 import re
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
-from ck2translator.translator import ArgosBackend, Backend, Cache, GoogleBackend, Translator
+from ck2translator.translator import ArgosBackend, Backend, Cache, GoogleBackend, Translator, _prepare_argos_stanza
 
 
 def argos(fn):
@@ -22,6 +25,31 @@ class Local(Backend):
 
 
 class ArgosTests(unittest.TestCase):
+    def test_stanza_loads_packaged_resources_without_downloading(self):
+        class CachedTranslation(SimpleNamespace):
+            pass
+
+        class CompositeTranslation(SimpleNamespace):
+            pass
+
+        class StanzaSentencizer(SimpleNamespace):
+            pass
+
+        package_path = Path("installed-model")
+        segmenter = StanzaSentencizer(stanza_pipeline=None, stanza_lang_code="en",
+                                      pkg=SimpleNamespace(package_path=package_path))
+        leg = CachedTranslation(underlying=SimpleNamespace(sentencizer=segmenter))
+        route = CompositeTranslation(t1=leg, t2=SimpleNamespace())
+        argos_module = SimpleNamespace(CachedTranslation=CachedTranslation, CompositeTranslation=CompositeTranslation,
+                                       StanzaSentencizer=StanzaSentencizer, settings=SimpleNamespace(device="cpu"))
+        stanza = SimpleNamespace(Pipeline=mock.Mock())
+        with mock.patch.dict("sys.modules", {"stanza": stanza}):
+            _prepare_argos_stanza(route, argos_module)
+            _prepare_argos_stanza(route, argos_module)
+        stanza.Pipeline.assert_called_once_with(lang="en", dir=str(package_path / "stanza"), processors="tokenize",
+                                               use_gpu=False, logging_level="WARNING", download_method=None)
+        self.assertIs(segmenter.stanza_pipeline, stanza.Pipeline.return_value)
+
     def test_marcadores_preservados(self):
         r = Translator(argos(lambda t: "PT " + t), self.enterContext(Cache()), keep=["Sigmar"]).translate("Praise Sigmar, $NAME$!")
         self.assertEqual((r.status, r.text), ("ok", "PT Praise Sigmar, $NAME$!"))

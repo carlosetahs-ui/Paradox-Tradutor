@@ -13,7 +13,7 @@ from .ck2loc import decode_bytes
 from .profiles import get_profile
 from .termos import collect, read_glossary, read_keep
 
-BACKENDS = ("translators", "ollama", "openai", "google", "argos", "echo")
+BACKENDS = ("translators", "ollama", "openai", "gemini", "google", "argos", "echo")
 _KNOWN_TRANSLATE = {
     "source_column", "write_columns", "mode", "output_dir", "cache", "reuse_cache_from",
     "workers", "skip_files", "context", "safety", "keep_file", "glossary_file", "ptbr_fix", "replace_file",
@@ -22,6 +22,7 @@ _KNOWN_MODEL = {
     "backend", "name", "host", "temperature", "timeout", "api_key", "source_lang", "target_lang",
     "providers", "max_per_minute", "max_per_hour", "pause_min", "pause_max", "long_pause_every",
     "long_pause_min", "long_pause_max", "long_pause", "max_retries", "backoff_base", "cooldown", "max_chars",
+    "batch_size",
 }
 
 
@@ -143,12 +144,18 @@ def _validate(cfg: dict) -> None:
         _number(model, key)
     for key in ("max_per_minute", "max_per_hour", "long_pause_every"):
         _number(model, key, integer=True)
-    for key in ("max_retries", "max_chars"):
+    for key in ("max_retries", "max_chars", "batch_size"):
         _number(model, key, integer=True, positive=True)
-    google = model.get("backend") == "google"
+    if model.get("batch_size", 1) > 50:
+        raise ConfigError("model.batch_size não pode ser maior que 50.")
+    backend = model.get("backend", "ollama")
+    pause_min, pause_max, long_min, long_max = {
+        "google": (1.0, 2.0, 40, 90),
+        "gemini": (0, 0, 0, 0),
+    }.get(backend, (1.5, 4.0, 40, 90))
     for low, high, default_low, default_high in (
-        ("pause_min", "pause_max", 1.0 if google else 1.5, 2.0 if google else 4.0),
-        ("long_pause_min", "long_pause_max", 40, 90),
+        ("pause_min", "pause_max", pause_min, pause_max),
+        ("long_pause_min", "long_pause_max", long_min, long_max),
     ):
         if model.get(low, default_low) > model.get(high, default_high):
             raise ConfigError(f"model.{low} não pode ser maior que model.{high}.")

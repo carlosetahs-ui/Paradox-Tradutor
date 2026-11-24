@@ -16,6 +16,17 @@ class TestRateLimiter(unittest.TestCase):
             lim.wait()
         self.assertGreaterEqual(c.t, 60)  # 6th request waits for the minute window
 
+    def test_bounded_history_still_enforces_both_windows(self):
+        clock = FakeClock()
+        limiter = RateLimiter(2, 3, (0, 0), 0, sleep=clock.sleep, now=clock.now)
+        for _ in range(3):
+            limiter.wait()
+        self.assertGreaterEqual(clock.t, 60)
+        self.assertLess(clock.t, 3600)
+        limiter.wait()
+        self.assertGreaterEqual(clock.t, 3600)
+        self.assertEqual(len(limiter.stamps), 3)
+
 
 class TestTranslatorsBackend(unittest.TestCase):
     def mk(self, fn):

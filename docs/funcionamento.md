@@ -3,7 +3,8 @@
 Consulte o [guia de instalação e uso](../README.md) para começar.
 
 Traduz a pasta `localisation` de **mods selecionados** do Crusader Kings II ou Europa Universalis IV para português do Brasil,
-usando um modelo de IA local (ollama/openai-compat), tradução offline (argos) ou serviços online (translators/google).
+usando um modelo de IA local (ollama/openai-compat), a API Gemini do Google AI Studio,
+tradução offline (argos) ou serviços online (translators/google).
 Python 3.11+; o núcleo só usa a biblioteca padrão (cada backend pede o seu `pip install`).
 
 ## Estratégia
@@ -108,7 +109,7 @@ configurados, os arquivos antigos ao lado da configuração têm prioridade; dep
 em `data/terms/`. Os exemplos indicam `cache = "data/cache/cache.sqlite"`; configurações que omitem
 essa opção mantêm o padrão antigo `cache.sqlite` ao lado da configuração.
 
-Como cada backend usa os termos: `ollama`/`openai` recebem no prompt ("manter exatamente" / "traduza X como Y").
+Como cada backend usa os termos: `ollama`/`openai`/`gemini` recebem no prompt ("manter exatamente" / "traduza X como Y").
 `translators`, `argos` e `google` não entendem instruções, então o termo vira um marcador `{n}` (como os códigos do
 jogo) e **a tradução do glossário é colocada no lugar depois** — é imposição exata, sem depender do serviço.
 Cuidado: por isso um erro no glossário se repete em todas as linhas; revise antes de ativar.
@@ -132,14 +133,20 @@ Uma tradução CK2 não será aplicada automaticamente a um texto EU4 idêntico.
 `python glossario_do_cache.py data/cache/cache.sqlite --min 4`.
 
 **6. Trocar de backend sem perder trabalho.** O cache guarda cada tradução com o nome do backend
-(`ollama:<modelo>`, `google`, `argos`). Com `reuse_cache_from = "auto"` (padrão), o backend atual reaproveita o que
+(`ollama:<modelo>`, `gemini:<modelo>`, `google`, `argos`). Com `reuse_cache_from = "auto"` (padrão), o backend atual reaproveita o que
 outro backend já traduziu **para o mesmo jogo** e só traduz o que falta, nos dois sentidos. Entradas antigas com defeito (marcadores
 perdidos, chinês no meio do texto) são ignoradas e refeitas. Para dar prioridade, use uma lista:
-`reuse_cache_from = ["google", "argos", "ollama"]` (a primeira que tiver o texto vence); `[]` desliga.
+`reuse_cache_from = ["google", "argos", "ollama", "gemini"]` (a primeira que tiver o texto vence); `[]` desliga.
 
-**7. Backends.** `ollama`/`openai` (modelo local, lento em CPU), `google` (rápido, envia o texto ao Google, pode
+**7. Backends.** `ollama`/`openai` (modelo local, lento em CPU), `gemini` (IA do Google AI Studio com chave),
+`google` (rápido, envia o texto ao Google, pode
 bloquear por IP) e `argos` (tradução automática offline, sem limite: `pip install argostranslate` e, uma vez,
 `python ck2tr.py argos-setup`).
+
+Quando o pacote do Argos inclui o segmentador Stanza e a biblioteca o seleciona, o tradutor carrega
+esses recursos locais sem a consulta de atualização do Stanza. Outros segmentadores podem exigir
+preparação inicial, dependendo do pacote instalado. Consulte a
+[documentação de uso offline do Argos](https://argos-translate.readthedocs.io/en/latest/source/troubleshooting.html).
 
 **8. Backend `translators` (recomendado).** `pip install translators`. Usa vários serviços online
 (google, bing, alibaba, yandex) em rodízio, com proteção contra bloqueio por excesso de pedidos:
@@ -150,6 +157,13 @@ que nada se perde. Ajuste tudo em `[model]` no `config.toml`.
 Proteção dos códigos em 3 níveis: (A) frase inteira com marcadores, consertando variações que os serviços criam
 (`xx 1 XX`, X cirílico...); (B) se algum código sumir, repetir ou sobrar, tenta outro serviço; (C) se ainda falhar,
 traduz só os trechos ENTRE os códigos, que assim nunca passam pelo serviço. Depois disso a validação normal ainda roda.
+
+No backend `gemini`, `model.batch_size` agrupa textos independentes no mesmo pedido para economizar
+RPM e RPD. Configure `translate.workers` com valor igual ou maior para preencher o lote. A resposta é
+separada por identificadores, e cada texto ainda passa individualmente pela proteção de marcadores,
+qualidade e cache. `batch_size = 1` mantém um pedido por texto.
+Se o Gemini devolver um lote bloqueado ou interrompido, os textos são solicitados individualmente
+para identificar quais podem ser traduzidos.
 
 **9. Pós-edição (pt-PT -> pt-BR e correções suas).** Os serviços online misturam português de Portugal
 ("partilhar", "ecrã", "está a fazer", "impressionam-me"). Depois de traduzir, o programa corrige o vocabulário, as
@@ -168,7 +182,7 @@ além dos avisos estruturais. `diff --find "texto ou chave"` também encontra en
 ## Uso
 
 ```
-1. Escolha o backend no config.toml (backend = "translators", "argos", "google" ou "ollama") e instale o que ele pede
+1. Escolha o backend no config.toml (`translators`, `argos`, `google`, `gemini`, `ollama` ou `openai`) e instale o que ele pede
 2. Copie examples/config.ck2.toml para config.toml na raiz (EU4: examples/config.eu4.toml para config.eu4.toml). Preencha [[mods]]
 3. python ck2tr.py scan      --config config.toml            # analisa, sem IA e sem gravar nada (avisa arquivos repetidos entre mods)
 4. python ck2tr.py status    --config config.toml            # quanto já está no cache, quanto falta e estimativa de tempo

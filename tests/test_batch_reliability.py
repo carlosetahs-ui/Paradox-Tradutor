@@ -6,11 +6,12 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
 from ck2translator import cli
-from ck2translator.translator import BackendError, Cache, GoogleBackend, translation_cancel
+from ck2translator.translator import Backend, BackendError, Cache, GoogleBackend, Translator, translation_cancel
 
 
 class BatchReliabilityTests(unittest.TestCase):
@@ -62,11 +63,33 @@ class BatchReliabilityTests(unittest.TestCase):
         self.assertIn("key1;falha;Castle 1", report)
         self.assertNotIn("private text", report)
 
+        looked_up = []
+        original_translate = Translator.translate
+        atomic_write = cli.atomic_write
+
+        def record(translator, text, **options):
+            looked_up.append(text)
+            return original_translate(translator, text, **options)
+
+        def preserve_output(path, data):
+            self.assertNotEqual(path, self.output, "saída idêntica não deve ser regravada")
+            return atomic_write(path, data)
+
+        with mock.patch.object(Translator, "translate", new=record), \
+                mock.patch.object(cli, "atomic_write", side_effect=preserve_output):
+            code, log = self.run_backend(first_call)
+        self.assertEqual(code, 1, log)
+        self.assertEqual(looked_up, ["Castle 1"])
+        self.assertEqual(self.output.read_text(encoding="utf-8-sig"), first_output)
+
         recovered = mock.Mock(return_value="Castelo 1")
-        code, log = self.run_backend(recovered)
+        looked_up.clear()
+        with mock.patch.object(Translator, "translate", new=record):
+            code, log = self.run_backend(recovered)
         self.assertEqual(code, 0, log)
+        self.assertEqual(looked_up, ["Castle 1"])
         recovered.assert_called_once_with("Castle 1")
-        self.assertIn('"Castelo 1"', self.output.read_text(encoding="utf-8-sig"))
+        self.assertEqual(self.output.read_text(encoding="utf-8-sig"), first_output.replace('"Castle 1"', '"Castelo 1"'))
 
     def test_service_outage_defers_rest_of_batch_after_five_affected_texts(self):
         self.configure(count=10)
@@ -95,6 +118,43 @@ class BatchReliabilityTests(unittest.TestCase):
         self.assertEqual(code, 0, log)
         recovered.assert_called_once_with("Castle 0")
         self.assertIn(b"Castelo 2", self.source.read_bytes())
+
+    def test_inplace_preserves_original_when_a_translation_is_rejected(self):
+        self.configure(game="ck2", mode="inplace")
+        original = self.source.read_bytes()
+
+        def translate(text):
+            return "O reino reino caiu." if text == "Castle 0" else text.replace("Castle", "Castelo")
+
+        code, log = self.run_backend(translate)
+        self.assertEqual(code, 1, log)
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertFalse((self.root / "saida" / "backup").exists())
+
+    def test_distinct_cache_keys_can_translate_concurrently(self):
+        started = threading.Barrier(2, timeout=2)
+        backend = mock.Mock(spec=Backend, model_id="test", uses_prompt=True, legacy_model_id=None)
+
+        def chat(system, user):
+            started.wait()
+            return "Castelo"
+
+        backend.chat.side_effect = chat
+        with Cache() as cache, ThreadPoolExecutor(max_workers=2) as pool:
+            translator = Translator(backend, cache)
+            # As duas chaves cairiam na mesma faixa do bloqueio anterior.
+            texts = {}
+            for number in range(65):
+                text = f"Castle {number}"
+                key = translator._key(text, [], [])
+                slot = int(key[:8], 16) % 64
+                if slot in texts:
+                    break
+                texts[slot] = text
+            futures = [pool.submit(translator.translate, source) for source in (texts[slot], text)]
+            self.assertEqual([future.result(timeout=3).status for future in futures], ["ok", "ok"])
+            self.assertEqual(translator.translate(text).status, "cache")
+        self.assertEqual(backend.chat.call_count, 2)
 
     def test_fatal_error_signals_other_running_workers_before_waiting(self):
         ready = threading.Event()

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .files import atomic_write
+from .files import write_if_changed
 
 if TYPE_CHECKING:
     from .config import Mod
@@ -61,7 +61,7 @@ def write_descriptors(out_root: Path, mod: Mod, cfg: dict | None = None) -> None
         text = (f'name = "{safe} [PT-BR]"\n'
                 f'path = "mod/{folder}"\n'
                 f'dependencies = {{ "{safe}" }}\n')
-        atomic_write(out_root / f"{folder}.mod", text.encode("cp1252", errors="replace"))
+        write_if_changed(out_root / f"{folder}.mod", text.encode("cp1252", errors="replace"))
         return
 
     text = (f"name = {_quoted(mod.name + ' [PT-BR]')}\n"
@@ -72,6 +72,6 @@ def write_descriptors(out_root: Path, mod: Mod, cfg: dict | None = None) -> None
         text += f"supported_version = {_quoted(supported)}\n"
     # O launcher reconstitui o arquivo externo a partir do descriptor interno.
     # O caminho é local à instalação e pertence apenas ao arquivo externo.
-    atomic_write(out_root / folder / "descriptor.mod", text.encode("utf-8"))
+    write_if_changed(out_root / folder / "descriptor.mod", text.encode("utf-8"))
     external = text + f'path = "mod/{folder}"\n'
-    atomic_write(out_root / f"{folder}.mod", external.encode("utf-8"))
+    write_if_changed(out_root / f"{folder}.mod", external.encode("utf-8"))

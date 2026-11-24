@@ -24,12 +24,14 @@ def _repetitions(text: str) -> list[tuple[str, int, int]]:
         for width in range(1, min(4, (len(words) - index) // 2) + 1):
             unit = folded[index:index + width]
             end = index + width
+            check_from = index + 1
             while folded[end:end + width] == unit:
                 candidate = end + width
                 if any(not text[words[p - 1].end():words[p].start()].isspace()
-                       for p in range(index + 1, candidate)):
+                       for p in range(check_from, candidate)):
                     break
                 end = candidate
+                check_from = candidate
             copies = (end - index) // width
             if copies > 1:
                 found.append((text[words[index].start():words[index + width - 1].end()], width, copies))
@@ -41,6 +43,8 @@ def _repetitions(text: str) -> list[tuple[str, int, int]]:
 
 
 def _unbalanced_angles(text: str) -> bool:
+    if "«" not in text and "»" not in text:
+        return False
     depth = 0
     for char in text:
         if char == "«":
@@ -58,6 +62,8 @@ def quality_problems(src: str, dst: str) -> list[str]:
     Repetições presentes na origem permitem a mesma quantidade de ênfase na
     tradução, mesmo quando as palavras mudam de idioma. Nada é apagado.
     """
+    if src == dst:
+        return []
     problems = []
     allowed = Counter((width, copies) for _, width, copies in _repetitions(src))
     for phrase, width, copies in _repetitions(dst):

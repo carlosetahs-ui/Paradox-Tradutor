@@ -24,3 +24,12 @@ def atomic_path(path: Path) -> Iterator[Path]:
 def atomic_write(path: Path, data: bytes) -> None:
     with atomic_path(path) as temporary:
         temporary.write_bytes(data)
+
+
+def write_if_changed(path: Path, data: bytes) -> None:
+    try:
+        if path.read_bytes() == data:
+            return
+    except FileNotFoundError:
+        pass
+    atomic_write(path, data)

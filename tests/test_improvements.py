@@ -10,7 +10,7 @@ from unittest import mock
 from ck2translator import cli as ck2tr
 from ck2translator.ck2loc import LocFile
 from ck2translator.translator import (
-    Cache, EchoBackend, GoogleBackend, RateLimiter, Translator, TranslatorsBackend, split_text,
+    Cache, EchoBackend, GeminiBackend, GoogleBackend, RateLimiter, Translator, TranslatorsBackend, split_text,
 )
 
 
@@ -63,6 +63,46 @@ class Improvements(unittest.TestCase):
         self.assertIn("faltam 1", message)
         self.assertFalse((self.root / "cache.sqlite").exists())
 
+    def test_gemini_backend_is_available_offline_and_live(self):
+        self.configure(model="backend = 'gemini'\nname = ' models/gemini-2.5-flash '")
+        code, message = self.run_cli("status")
+        self.assertEqual(code, 0, message)
+        self.assertIn("faltam 1", message)
+        cfg = ck2tr.load_config(str(self.config))
+        with mock.patch.dict("os.environ", {"GEMINI_API_KEY": "secret"}, clear=True):
+            backend = ck2tr.build_backend(cfg, None)
+        self.assertIsInstance(backend, GeminiBackend)
+        self.assertEqual(backend.model_id, "gemini:gemini-2.5-flash")
+        self.assertEqual(ck2tr.build_backend(cfg, None, offline=True).model_id, backend.model_id)
+        self.assertEqual(backend.limiter.per_minute, 10)
+
+    def test_gemini_resume_reads_cache_created_with_the_previous_model_id(self):
+        self.configure("reuse_cache_from = []", "backend = 'gemini'\nname = 'models/gemini-test'")
+        previous = GeminiBackend("gemini-test", "secret")
+        previous.model_id = "gemini:models/gemini-test"
+        with Cache(str(self.root / "cache.sqlite")) as cache, \
+                mock.patch.object(previous, "chat", return_value="Olá {1}"):
+            self.assertEqual(Translator(previous, cache).translate("Hello $NAME$").status, "ok")
+        with mock.patch.dict("os.environ", {}, clear=True):
+            code, log = self.run_cli("status")
+            self.assertEqual(code, 0, log)
+            self.assertIn("faltam 0", log)
+            code, log = self.run_cli("translate")
+            self.assertEqual(code, 0, log)
+        output = self.root / "saida" / "meu_mod_ptbr" / "localisation" / "a.CSV"
+        self.assertIn("Olá $NAME$", output.read_text(encoding="cp1252"))
+
+    def test_gemini_validates_pauses_against_its_zero_defaults(self):
+        self.configure(model="backend = 'gemini'\nname = 'gemini-test'\npause_max = 0\nlong_pause_max = 0")
+        cfg = ck2tr.load_config(str(self.config))
+        backend = ck2tr.build_backend(cfg, None, offline=True)
+        self.assertEqual(backend.limiter.pause, (0, 0))
+        self.assertEqual(backend.limiter.long_pause, (0, 0))
+        self.configure(model="backend = 'gemini'\nname = 'gemini-test'\npause_min = 1")
+        code, message = self.run_cli("status")
+        self.assertEqual(code, 2, message)
+        self.assertIn("model.pause_min", message)
+
     def test_diff_checks_target_column_and_uppercase_csv(self):
         self.configure("write_columns = ['french']")
         self.assertEqual(self.run_cli("translate")[0], 0)
@@ -111,7 +151,8 @@ class Improvements(unittest.TestCase):
 
     def test_model_values_are_validated(self):
         for settings in ("timeout = 0", "pause_min = -1", "pause_min = 5\npause_max = 1",
-                         "providers = []", "max_retries = 0", "max_chars = false"):
+                         "providers = []", "max_retries = 0", "max_chars = false",
+                         "batch_size = 0", "batch_size = 51"):
             with self.subTest(settings=settings):
                 self.configure(model="backend = 'echo'\n" + settings)
                 code, message = self.run_cli("scan")

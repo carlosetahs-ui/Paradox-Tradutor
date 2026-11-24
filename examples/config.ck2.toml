@@ -39,7 +39,7 @@
 #
 # --config: escolhe o TOML; caminhos relativos partem da pasta desse arquivo.
 # --mod também funciona com scan, status, check, verify, terms, diff e package.
-# --backend existe em translate e status: translators | google | argos | ollama | openai | echo.
+# --backend existe em translate e status: translators | google | gemini | argos | ollama | openai | echo.
 # --mode existe em translate, check, verify e diff; EU4 aceita somente overlay.
 # --limit vale apenas para translate; --find apenas para diff; --min-count apenas para terms.
 # --limit reconstrói a saída dessa execução; para a tradução completa, rode sem --limit.
@@ -94,6 +94,15 @@ target_lang = "pt"
 # api_key = ""                # se o servidor exigir, preencha só no TOML local
 # Ollama e OpenAI compatível exigem HTTPS fora desta máquina.
 
+# gemini: crie uma chave no Google AI Studio e defina $env:GEMINI_API_KEY no PowerShell.
+# Não exige pacote adicional. Confira no AI Studio os modelos e limites disponíveis para sua conta.
+# name = "gemini-3.5-flash-lite" # escolha um modelo disponível no seu projeto
+# temperature = 0.2
+# max_per_minute = 10
+# batch_size = 8             # textos por pedido; use workers >= batch_size
+# timeout = 180
+# api_key = ""                # alternativa menos segura: use apenas em TOML local ignorado pelo Git
+
 # echo: acrescenta "PT> " para testar a geração de arquivos sem rede.
 
 [translate]
@@ -103,8 +112,8 @@ write_columns = ["english"]
 mode = "overlay"            # mod separado; inplace altera o original com backup
 output_dir = "saida"
 cache = "data/cache/cache.sqlite"
-reuse_cache_from = "auto"   # ou ["google", "argos", "ollama"]; [] desativa
-workers = 1                 # comece com um worker para serviços online
+reuse_cache_from = "auto"   # ou ["google", "argos", "ollama", "gemini"]; [] desativa
+workers = 1                 # para lotes Gemini, use o mesmo valor de model.batch_size
 safety = "strict"           # normal | strict | paranoid (pula textos com códigos)
 skip_files = []             # aceita padrões, ex.: ["*_baronies.csv"]
 context = "Fantasia medieval em um mod para Crusader Kings II."

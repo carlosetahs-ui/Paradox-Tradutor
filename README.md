@@ -34,6 +34,7 @@ Instale somente o backend que vai usar:
 | `argos` | `python -m pip install -e ".[argos]"` | Tradução offline; depois rode `python ck2tr.py argos-setup` |
 | `ollama` | `python -m pip install -e .` | Modelo local; exige o servidor e o modelo instalados |
 | `openai` | `python -m pip install -e .` | Servidor compatível, como LM Studio ou llama.cpp |
+| `gemini` | `python -m pip install -e .` | Gemini API do Google AI Studio; aceita chave do tier gratuito |
 | `echo` | Nenhuma dependência | Teste do fluxo; acrescenta `PT> ` e não traduz |
 
 Também é possível executar diretamente `python ck2tr.py` ou `python -m ck2translator`, sem instalar
@@ -156,19 +157,21 @@ traduções armazenadas antes de usá-las.
 Se todos os textos selecionados estiverem resolvidos pelo cache, pelo glossário ou pelas regras de exclusão,
 `translate` pode reconstruir a saída sem iniciar o backend de tradução.
 No modo `overlay`, o programa grava cada arquivo ao terminá-lo. Em uma nova execução completa, ele pula
-os arquivos já concluídos quando a origem, a saída e as opções de tradução continuam iguais. Arquivos
-incompletos, alterados ou apagados são reprocessados com ajuda do cache. Se uma execução for interrompida
-no meio de um arquivo, as traduções já salvas no SQLite também serão reaproveitadas.
+os arquivos concluídos quando a origem, a saída e as opções de tradução continuam iguais. Nos arquivos
+parciais registrados no manifesto, ele retoma apenas os textos pendentes. Arquivos alterados, apagados ou
+sem registro são conferidos com ajuda do cache. Se a saída ficar idêntica, o arquivo não é regravado.
+Se a execução for interrompida no meio de um arquivo, as traduções já salvas no SQLite serão reaproveitadas.
 Se uma linha não passar nas proteções, mantém o original e registra o motivo em
 `saida/<mod>_relatorio.csv`. Uma nova execução atualiza esse relatório.
-Falhas isoladas do backend também entram no relatório. Após cinco falhas seguidas em um mod,
+Falhas isoladas do backend também entram no relatório. Após cinco falhas de serviço seguidas em um mod,
 o programa grava o que já conseguiu em `overlay` e deixa o restante para uma nova execução. No modo
-`inplace`, falhas do backend preservam o mod original para permitir a retomada.
+`inplace`, se alguma tradução falhar, o mod original é preservado para permitir a retomada.
 `model.timeout` ajusta o tempo de espera das operações de rede em `google` e `translators` (30 s)
-e em `ollama` e `openai` (180 s). Os servidores Ollama e OpenAI compatível exigem HTTPS fora
+e em `ollama`, `openai` e `gemini` (180 s). Os servidores Ollama e OpenAI compatível exigem HTTPS fora
 do próprio computador.
-`--limit` usa os primeiros N textos únicos do mod e reconstrói os arquivos processados a partir do original.
-Para completar a tradução, rode novamente sem `--limit`.
+`--limit` usa os primeiros N textos únicos do mod. Arquivos com textos selecionados são reconstruídos
+a partir do original. Arquivos fora da seleção são preservados. Para completar a tradução, rode novamente
+sem `--limit`.
 
 | Comando/opção | Finalidade |
 | --- | --- |
@@ -192,6 +195,38 @@ Todos esses comandos funcionam com os dois perfis; use `--config config.eu4.toml
 
 No CK2, o modo `inplace` altera o mod original com backup em `saida/backup/` e bloqueia uma segunda execução
 até que o original seja restaurado. Para o uso normal, mantenha `mode = "overlay"`.
+
+### Google AI Studio (Gemini)
+
+Crie uma chave no [Google AI Studio](https://aistudio.google.com/apikey) e, no PowerShell da sessão,
+defina-a sem gravá-la no repositório:
+
+```powershell
+$env:GEMINI_API_KEY = "sua-chave"
+```
+
+Depois configure o modelo disponível para a sua conta:
+
+```toml
+[model]
+backend = "gemini"
+name = "gemini-3.5-flash-lite"
+temperature = 0.2
+max_per_minute = 10
+batch_size = 8
+timeout = 180
+```
+
+Também são aceitos `GOOGLE_API_KEY` e `model.api_key`, mas a variável de ambiente evita salvar o
+segredo no TOML. Se você definir as duas variáveis de ambiente, `GOOGLE_API_KEY` tem preferência.
+Confira os modelos e as cotas no AI Studio e ajuste `name` e `max_per_minute`. O limite local conta
+tentativas de rede, mas o Google também pode aplicar limites diários e por tokens. Os textos enviados
+podem ser usados pelo Google para melhorar os produtos no tier gratuito.
+
+Para economizar a cota de pedidos, `batch_size` agrupa vários textos independentes em uma chamada.
+Use `workers` igual ou maior que o lote; cada tradução continua validada e armazenada no cache
+separadamente. Uma configuração equilibrada é `batch_size = 8` em `[model]` e `workers = 8` em
+`[translate]`. Use `batch_size = 1` para desativar os lotes.
 
 ## Organização
 

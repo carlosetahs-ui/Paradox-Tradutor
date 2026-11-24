@@ -30,6 +30,11 @@ class GoogleTests(unittest.TestCase):
         r = Translator(backend(lambda t: t.replace("XX1XX", "xx 1 xx") + " ola"), self.enterContext(Cache())).translate("Hi $A$")
         self.assertEqual(r.text, "Hi $A$ ola")
 
+    def test_marcador_com_letras_gregas_e_cirilicas(self):
+        engine = backend(lambda text: text.replace("Hello", "Olá").replace("XX1XX", "Х χ 1 Χ х"))
+        result = Translator(engine, self.enterContext(Cache())).translate("Hello $NAME$")
+        self.assertEqual((result.status, result.text, engine.count), ("ok", "Olá $NAME$", 1))
+
     def test_bloqueio_para_tudo(self):
         def fn(t):
             raise RuntimeError("429 too many requests")
